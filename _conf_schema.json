@@ -2,41 +2,137 @@
   "public_export_language": {
     "type": "string",
     "default": "zh",
-    "description": "PublicExport language key (e.g. zh, en)"
+    "options": ["zh", "en"],
+    "description": "PublicExport 语言",
+    "hint": "用于下载官方 PublicExport index_<lang>.txt.lzma"
   },
+  "refresh": {
+    "type": "object",
+    "description": "刷新间隔（秒）",
+    "items": {
+      "worldstate": {
+        "type": "int",
+        "default": 600,
+        "description": "worldState.php 刷新间隔"
+      },
+      "public_export": {
+        "type": "int",
+        "default": 21600,
+        "description": "PublicExport 刷新间隔"
+      },
+      "mirrors": {
+        "type": "int",
+        "default": 21600,
+        "description": "镜像数据源刷新间隔"
+      },
+      "market_bootstrap": {
+        "type": "int",
+        "default": 86400,
+        "description": "warframe.market 列表数据刷新间隔"
+      }
+    }
+  },
+  "retention": {
+    "type": "object",
+    "description": "存储与清理",
+    "items": {
+      "cleanup_days": {
+        "type": "int",
+        "default": 14,
+        "description": "保留天数（快照/缓存/图片缓存）"
+      },
+      "keep_worldstate_snapshots": {
+        "type": "int",
+        "default": 24,
+        "description": "worldstate 快照保留数量"
+      },
+      "keep_mirror_snapshots": {
+        "type": "int",
+        "default": 10,
+        "description": "每个 mirror 数据集快照保留数量"
+      }
+    }
+  },
+  "render": {
+    "type": "object",
+    "description": "图片渲染",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": false,
+        "description": "将 /wf 输出渲染为图片"
+      },
+      "cache_images": {
+        "type": "bool",
+        "default": false,
+        "description": "缓存渲染后的图片到磁盘"
+      },
+      "keep_images": {
+        "type": "int",
+        "default": 10,
+        "description": "图片缓存保留数量"
+      }
+    }
+  },
+
   "worldstate_refresh_interval": {
-    "type": "number",
+    "type": "int",
     "default": 600,
-    "description": "worldState refresh interval (seconds)"
+    "description": "(deprecated) use refresh.worldstate",
+    "invisible": true
   },
   "public_export_refresh_interval": {
-    "type": "number",
+    "type": "int",
     "default": 21600,
-    "description": "PublicExport refresh interval (seconds)"
+    "description": "(deprecated) use refresh.public_export",
+    "invisible": true
   },
   "mirrors_refresh_interval": {
-    "type": "number",
+    "type": "int",
     "default": 21600,
-    "description": "Mirror datasets refresh interval (seconds)"
+    "description": "(deprecated) use refresh.mirrors",
+    "invisible": true
   },
   "market_bootstrap_refresh_interval": {
-    "type": "number",
+    "type": "int",
     "default": 86400,
-    "description": "warframe.market list refresh interval (seconds)"
+    "description": "(deprecated) use refresh.market_bootstrap",
+    "invisible": true
   },
   "cleanup_retention_days": {
-    "type": "number",
+    "type": "int",
     "default": 14,
-    "description": "Retention days for snapshots and store"
+    "description": "(deprecated) use retention.cleanup_days",
+    "invisible": true
   },
   "keep_worldstate_snapshots": {
-    "type": "number",
+    "type": "int",
     "default": 24,
-    "description": "How many worldstate snapshots to keep"
+    "description": "(deprecated) use retention.keep_worldstate_snapshots",
+    "invisible": true
   },
   "keep_mirror_snapshots": {
-    "type": "number",
+    "type": "int",
     "default": 10,
-    "description": "How many mirror snapshots to keep per dataset"
+    "description": "(deprecated) use retention.keep_mirror_snapshots",
+    "invisible": true
+  },
+  "image_mode": {
+    "type": "bool",
+    "default": false,
+    "description": "(deprecated) use render.enabled",
+    "invisible": true
+  },
+  "cache_images": {
+    "type": "bool",
+    "default": false,
+    "description": "(deprecated) use render.cache_images",
+    "invisible": true
+  },
+  "keep_image_cache": {
+    "type": "int",
+    "default": 10,
+    "description": "(deprecated) use render.keep_images",
+    "invisible": true
   }
 }

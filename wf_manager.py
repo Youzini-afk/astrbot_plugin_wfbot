@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from wf_cache import FileCache
 from wf_config import WarframeConfig
@@ -41,27 +41,17 @@ def _is_older_than(path: Path, *, cutoff: datetime) -> bool:
     return mtime < cutoff
 
 
+def _json_bytes(obj: Any) -> bytes:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
 @dataclass(frozen=True)
 class MirrorDataset:
-    """
-    A mirrored JSON dataset (NyxBot's ApiDataSourceUtils style).
-
-    name: used for cache folder naming
-    urls: mirror URL list, fetched concurrently and first-success wins
-    """
-
     name: str
     urls: list[str]
 
 
 class WarframeDataManager:
-    """
-    NyxBot-inspired data management:
-    - 拉取（定时刷新、并发镜像取首个成功）
-    - 存储（latest + snapshots + metadata）
-    - 清理（保留数量 + 按天数过期清理 + PublicExport 无用文件清理）
-    """
-
     def __init__(self, ds: WarframeDataSource) -> None:
         self._ds = ds
         self._cfg: WarframeConfig = ds.config
@@ -88,19 +78,16 @@ class WarframeDataManager:
 
         self._mirrors: list[MirrorDataset] = []
 
-        # In-memory cache (NyxBot caches for 3 minutes)
         self._worldstate_mem: Any | None = None
         self._worldstate_mem_at: float | None = None
 
     def register_mirrors(self, datasets: Iterable[MirrorDataset]) -> None:
         self._mirrors = list(datasets)
 
-    # ---------- Public APIs (pull + store) ----------
-
     async def refresh_worldstate(self, *, snapshot: bool = True) -> WorldStateResult:
         async with self._worldstate_lock:
-            old_meta = self._cache.read_json("worldstate", "latest.meta.json") or {}
-            old_sha = old_meta.get("sha256") if isinstance(old_meta, dict) else None
+            old_meta = self.get_worldstate_meta() or {}
+            old_sha = old_meta.get("sha256")
             old_json = self._ds.worldstate.load_cached()
 
             result = await self._ds.worldstate.refresh_cache()
@@ -126,18 +113,19 @@ class WarframeDataManager:
                 self._trim_snapshots(self._cache.path("worldstate", "snapshots"), keep=self._cfg.keep_worldstate_snapshots)
 
             if self._store is not None:
-                self._store.put_snapshot(
-                    source="warframe",
-                    name="worldstate",
-                    status=result.status,
-                    url=result.url,
-                    sha256=new_sha,
-                    json_obj=result.json,
-                    raw=result.raw,
-                )
+                put = getattr(self._store, "put_snapshot", None)
+                if callable(put):
+                    put(
+                        source="warframe",
+                        name="worldstate",
+                        status=result.status,
+                        url=result.url,
+                        sha256=new_sha,
+                        json_obj=result.json,
+                        raw=result.raw,
+                    )
 
-            changed = (old_sha is not None) and (old_sha != new_sha)
-            if changed:
+            if old_sha is not None and old_sha != new_sha:
                 await self.events.emit(
                     "worldstate.updated",
                     {
@@ -148,6 +136,7 @@ class WarframeDataManager:
                         "fetched_at": meta["fetched_at"],
                     },
                 )
+
             return result
 
     def get_worldstate_cached(self) -> Any | None:
@@ -159,6 +148,17 @@ class WarframeDataManager:
         self._worldstate_mem_at = time.time()
         return data
 
+    def get_worldstate_meta(self) -> dict[str, Any] | None:
+        meta = self._cache.read_json("worldstate", "latest.meta.json")
+        return meta if isinstance(meta, dict) else None
+
+
+    def get_mirror_cached(self, name: str) -> Any | None:
+        return self._cache.read_json("mirrors", name, "latest.json")
+
+    def get_mirror_meta(self, name: str) -> dict[str, Any] | None:
+        meta = self._cache.read_json("mirrors", name, "latest.meta.json")
+        return meta if isinstance(meta, dict) else None
     async def refresh_public_export(self) -> PublicExportUpdateResult:
         async with self._public_export_lock:
             res = await self._ds.public_export.update(language=self._cfg.public_export_language)
@@ -170,7 +170,6 @@ class WarframeDataManager:
                 "downloaded_files": res.downloaded_files,
             }
             self._cache.write_json(meta, "public_export", "latest.meta.json")
-            # Remove export files not referenced by current hashes (optional hygiene)
             self._cleanup_public_export_orphans(language=self._cfg.public_export_language)
             if res.downloaded_files:
                 await self.events.emit(
@@ -185,25 +184,18 @@ class WarframeDataManager:
             return res
 
     async def refresh_mirrors(self) -> dict[str, Any]:
-        """
-        Refresh all registered mirror datasets. Returns {dataset_name: json or None}.
-        """
         async with self._mirrors_lock:
             out: dict[str, Any] = {}
             for ds in self._mirrors:
-                old_meta = self._cache.read_json("mirrors", ds.name, "latest.meta.json") or {}
+                old_meta = self._cache.read_json("mirrors", ds.name, "latest.meta.json")
                 old_sha = old_meta.get("sha256") if isinstance(old_meta, dict) else None
+
                 result = await self._ds.mirrors.fetch_first_json(ds.urls)
                 out[ds.name] = result.json
-
                 if result.json is None:
                     continue
 
-                raw = (
-                    json_bytes(result.json)
-                    if isinstance(result.json, (dict, list))
-                    else str(result.json).encode("utf-8", errors="replace")
-                )
+                raw = _json_bytes(result.json) if isinstance(result.json, (dict, list)) else str(result.json).encode("utf-8", errors="replace")
                 new_sha = hashlib.sha256(raw).hexdigest()
                 meta = {
                     "fetched_at": _utcnow().isoformat(),
@@ -220,15 +212,17 @@ class WarframeDataManager:
                 self._trim_snapshots(self._cache.path("mirrors", ds.name, "snapshots"), keep=self._cfg.keep_mirror_snapshots)
 
                 if self._store is not None:
-                    self._store.put_snapshot(
-                        source="mirrors",
-                        name=ds.name,
-                        status=int(result.status or 0),
-                        url=str(result.url or ""),
-                        sha256=new_sha,
-                        json_obj=result.json,
-                        raw=raw,
-                    )
+                    put = getattr(self._store, "put_snapshot", None)
+                    if callable(put):
+                        put(
+                            source="mirrors",
+                            name=ds.name,
+                            status=int(result.status or 0),
+                            url=str(result.url or ""),
+                            sha256=new_sha,
+                            json_obj=result.json,
+                            raw=raw,
+                        )
 
                 if old_sha is not None and old_sha != new_sha:
                     await self.events.emit(
@@ -246,66 +240,43 @@ class WarframeDataManager:
             return out
 
     async def refresh_market_bootstrap(self) -> dict[str, int]:
-        """
-        Refresh 'list' endpoints used for later queries (items, riven weapons, lich/sister weapons, ephemeras).
-        """
         async with self._market_lock:
             saved: dict[str, int] = {}
 
-            def store(name: str, payload: Any | None, status: int, url: str) -> None:
-                if payload is None:
+            async def store(name: str, resp) -> None:
+                if resp.json is None:
                     return
-                raw = json_bytes(payload) if isinstance(payload, (dict, list)) else str(payload).encode("utf-8", errors="replace")
+                raw = _json_bytes(resp.json) if isinstance(resp.json, (dict, list)) else str(resp.json).encode("utf-8", errors="replace")
                 sha = hashlib.sha256(raw).hexdigest()
-                meta = {"fetched_at": _utcnow().isoformat(), "status": status, "url": url}
-                self._cache.write_json(payload, "market", name, "latest.json")
+                meta = {"fetched_at": _utcnow().isoformat(), "status": resp.status, "url": resp.url, "sha256": sha}
+                self._cache.write_json(resp.json, "market", name, "latest.json")
                 self._cache.write_json(meta, "market", name, "latest.meta.json")
                 if self._store is not None:
-                    self._store.put_snapshot(
-                        source="market",
-                        name=name,
-                        status=status,
-                        url=url,
-                        sha256=sha,
-                        json_obj=payload,
-                        raw=raw,
-                    )
+                    put = getattr(self._store, "put_snapshot", None)
+                    if callable(put):
+                        put(source="market", name=name, status=resp.status, url=resp.url, sha256=sha, json_obj=resp.json, raw=raw)
                 saved[name] = 1
 
-            resp = await self._ds.market.get_items()
-            store("items", resp.json, resp.status, resp.url)
-
-            resp = await self._ds.market.get_riven_weapons()
-            store("riven_weapons", resp.json, resp.status, resp.url)
-
-            resp = await self._ds.market.get_lich_weapons()
-            store("lich_weapons", resp.json, resp.status, resp.url)
-
-            resp = await self._ds.market.get_sister_weapons()
-            store("sister_weapons", resp.json, resp.status, resp.url)
-
-            resp = await self._ds.market.get_lich_ephemeras()
-            store("lich_ephemeras", resp.json, resp.status, resp.url)
-
-            resp = await self._ds.market.get_sister_ephemeras()
-            store("sister_ephemeras", resp.json, resp.status, resp.url)
+            await store("items", await self._ds.market.get_items())
+            await store("riven_weapons", await self._ds.market.get_riven_weapons())
+            await store("lich_weapons", await self._ds.market.get_lich_weapons())
+            await store("sister_weapons", await self._ds.market.get_sister_weapons())
+            await store("lich_ephemeras", await self._ds.market.get_lich_ephemeras())
+            await store("sister_ephemeras", await self._ds.market.get_sister_ephemeras())
 
             return saved
-
-    # ---------- Cleanup ----------
 
     def cleanup(self) -> None:
         cutoff = _utcnow() - timedelta(days=int(max(0, self._cfg.cleanup_retention_days)))
         self._delete_older_than(self._cache.path("worldstate", "snapshots"), cutoff=cutoff)
         self._delete_older_than(self._cache.path("mirrors"), cutoff=cutoff)
         self._delete_older_than(self._cache.path("market"), cutoff=cutoff)
-        # PublicExport is content-addressed-ish; prefer orphan cleanup + age cleanup for indexes.
         self._delete_older_than(self._cache.path("public_export"), cutoff=cutoff, patterns=(".lzma", ".txt"))
         self._prune_empty_dirs(self._cache.base_dir)
         if self._store is not None:
-            self._store.prune(retention_days=self._cfg.cleanup_retention_days)
-
-    # ---------- Scheduler (asyncio) ----------
+            prune = getattr(self._store, "prune", None)
+            if callable(prune):
+                prune(retention_days=self._cfg.cleanup_retention_days)
 
     async def start_async(self) -> None:
         if self._task and not self._task.done():
@@ -370,12 +341,8 @@ class WarframeDataManager:
             except asyncio.TimeoutError:
                 pass
 
-    # ---------- Internals ----------
-
     def _trim_snapshots(self, snapshots_dir: Path, *, keep: int) -> None:
-        if keep <= 0:
-            return
-        if not snapshots_dir.exists():
+        if keep <= 0 or not snapshots_dir.exists():
             return
         files = sorted([p for p in snapshots_dir.glob("*.json") if p.is_file()], key=lambda p: p.stat().st_mtime, reverse=True)
         for p in files[keep:]:
@@ -406,7 +373,6 @@ class WarframeDataManager:
     def _prune_empty_dirs(self, root: Path) -> None:
         if not root.exists():
             return
-        # bottom-up
         for p in sorted(root.rglob("*"), key=lambda x: len(x.parts), reverse=True):
             if p.is_dir():
                 try:
@@ -431,11 +397,4 @@ class WarframeDataManager:
                     p.unlink()
                 except FileNotFoundError:
                     pass
-
-
-def json_bytes(obj: Any) -> bytes:
-    import json
-
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
 
