@@ -1,0 +1,42 @@
+{
+  "public_export_language": {
+    "type": "string",
+    "default": "zh",
+    "description": "PublicExport language key (e.g. zh, en)"
+  },
+  "worldstate_refresh_interval": {
+    "type": "number",
+    "default": 600,
+    "description": "worldState refresh interval (seconds)"
+  },
+  "public_export_refresh_interval": {
+    "type": "number",
+    "default": 21600,
+    "description": "PublicExport refresh interval (seconds)"
+  },
+  "mirrors_refresh_interval": {
+    "type": "number",
+    "default": 21600,
+    "description": "Mirror datasets refresh interval (seconds)"
+  },
+  "market_bootstrap_refresh_interval": {
+    "type": "number",
+    "default": 86400,
+    "description": "warframe.market list refresh interval (seconds)"
+  },
+  "cleanup_retention_days": {
+    "type": "number",
+    "default": 14,
+    "description": "Retention days for snapshots and store"
+  },
+  "keep_worldstate_snapshots": {
+    "type": "number",
+    "default": 24,
+    "description": "How many worldstate snapshots to keep"
+  },
+  "keep_mirror_snapshots": {
+    "type": "number",
+    "default": 10,
+    "description": "How many mirror snapshots to keep per dataset"
+  }
+}

@@ -1,0 +1,81 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from wf_cache import FileCache
+from wf_config import WarframeConfig
+from wf_http import HttpClient
+from wf_urls import (
+    WARFRAME_DATA_SOURCE_ALIAS,
+    WARFRAME_DATA_SOURCE_MARKET_RIVEN_TION,
+    WARFRAME_DATA_SOURCE_MARKET_RIVEN_TION_ALIAS,
+    WARFRAME_DATA_SOURCE_NODES,
+    WARFRAME_DATA_SOURCE_REWARD_POOL,
+    WARFRAME_DATA_SOURCE_RIVEN_ANALYSE_TREND,
+    WARFRAME_DATA_SOURCE_STATE_TRANSLATION,
+)
+from wf_source_mirrors import MirrorSourceFetcher
+from wf_source_public_export import PublicExportClient
+from wf_source_market import WarframeMarketClient
+from wf_source_worldstate import WorldStateClient
+
+
+@dataclass(frozen=True)
+class WarframeDataSource:
+    """
+    Convenience facade assembling all fetchers with shared config.
+
+    This is intended to be created once in your AstrBot plugin and reused.
+    """
+
+    config: WarframeConfig
+    http: HttpClient
+    cache: FileCache
+    worldstate: WorldStateClient
+    public_export: PublicExportClient
+    mirrors: MirrorSourceFetcher
+    market: WarframeMarketClient
+
+    @classmethod
+    def create(cls, config: WarframeConfig | None = None) -> "WarframeDataSource":
+        cfg = config or WarframeConfig()
+        cache = FileCache(cfg.data_dir)
+        http = HttpClient(
+            connect_timeout=cfg.connect_timeout,
+            read_timeout=cfg.read_timeout,
+            retries=cfg.retries,
+            retry_backoff_seconds=cfg.retry_backoff_seconds,
+        )
+        return cls(
+            config=cfg,
+            http=http,
+            cache=cache,
+            worldstate=WorldStateClient(http, cache),
+            public_export=PublicExportClient(http, cache),
+            mirrors=MirrorSourceFetcher(http, retries=cfg.retries, retry_backoff_seconds=cfg.retry_backoff_seconds),
+            market=WarframeMarketClient(http),
+        )
+
+    async def aclose(self) -> None:
+        await self.http.aclose()
+
+    def create_manager(self):
+        """
+        Returns a WarframeDataManager pre-registered with NyxBot-style mirror datasets.
+        """
+        from wf_manager import MirrorDataset, WarframeDataManager
+
+        mgr = WarframeDataManager(self)
+        mgr.register_mirrors(
+            [
+                MirrorDataset("alias", list(WARFRAME_DATA_SOURCE_ALIAS)),
+                MirrorDataset("market_riven_tion", list(WARFRAME_DATA_SOURCE_MARKET_RIVEN_TION)),
+                MirrorDataset("market_riven_tion_alias", list(WARFRAME_DATA_SOURCE_MARKET_RIVEN_TION_ALIAS)),
+                MirrorDataset("nodes", list(WARFRAME_DATA_SOURCE_NODES)),
+                MirrorDataset("reward_pool", list(WARFRAME_DATA_SOURCE_REWARD_POOL)),
+                MirrorDataset("riven_analyse_trend", list(WARFRAME_DATA_SOURCE_RIVEN_ANALYSE_TREND)),
+                MirrorDataset("state_translation", list(WARFRAME_DATA_SOURCE_STATE_TRANSLATION)),
+            ]
+        )
+        return mgr
+
