@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from astrbot.api.all import *  # type: ignore
+from astrbot.api import logger  # type: ignore
 from astrbot.api.event import filter as afilter  # type: ignore
 import astrbot.api.message_components as Comp
 
@@ -38,7 +38,6 @@ from .wf_i18n import to_simplified_zh
 
 
 PLUGIN_ID = "astrbot_plugin_wfbot"
-logger = logging.getLogger(__name__)
 
 
 @register("astrbot_plugin_wfbot", "Youzini", "Warframe 数据层（世界状态/PublicExport/多镜像/market），支持缓存、清理与定时刷新", "0.1.0")
@@ -115,7 +114,15 @@ class WarframeDatasourcePlugin(Star):
             self._task = None
 
     def _resolve_plugin_data_dir(self) -> Path:
-        # Prefer official path helper (AstrBot docs): data/plugin_data/<plugin_name>/
+        # Prefer AstrBot standard tools (review requirement).
+        try:
+            from astrbot.api.star import StarTools  # type: ignore
+
+            return Path(StarTools.get_data_dir(PLUGIN_ID))
+        except Exception:
+            pass
+
+        # Fallback: official path helper (older docs): data/plugin_data/<plugin_name>/
         try:
             from astrbot.core.utils.astrbot_path import get_astrbot_data_path  # type: ignore
 
@@ -123,46 +130,17 @@ class WarframeDatasourcePlugin(Star):
             return Path(get_astrbot_data_path()) / "plugin_data" / plugin_name
         except Exception:
             pass
-
-        # Newer AstrBot may provide context.get_data_dir() (or Star.get_data_dir()).
-        get_data_dir = getattr(self.context, "get_data_dir", None)
-        if callable(get_data_dir):
-            try:
-                return Path(str(get_data_dir()))
-            except Exception:
-                pass
-
-        get_plugin_data_dir = getattr(self.context, "get_plugin_data_dir", None)
-        if callable(get_plugin_data_dir):
-            try:
-                return Path(str(get_plugin_data_dir(PLUGIN_ID)))
-            except Exception:
-                pass
-
-        star_get_data_dir = getattr(self, "get_data_dir", None)
-        if callable(star_get_data_dir):
-            try:
-                return Path(str(star_get_data_dir()))
-            except Exception:
-                pass
-
-        # Fallback: infer from plugin location: .../data/plugins/<plugin_id>/main.py
-        here = Path(__file__).resolve()
-        for p in here.parents:
-            if p.name == "plugins" and p.parent.name == "data":
-                return p.parent / "plugin_data" / PLUGIN_ID
-
-        # Last resort: relative to CWD (best effort).
-        return Path.cwd() / "data" / "plugin_data" / PLUGIN_ID
+        # Last resort: use plugin-local folder (best effort).
+        return Path(__file__).resolve().parent / ".plugin_data"
 
     async def _send_text_or_image(self, event: AstrMessageEvent, *, title: str, text: str):
         if not self.img_cfg.enabled:
-            yield event.chain_result([Comp.Plain("\u200b" + text)])
+            yield event.chain_result([Comp.Plain(text)])
             return
 
-        path = get_or_render_png(text=text, title=title, out_dir=self.img_dir, cfg=self.img_cfg, key_prefix="wf")
+        path = await get_or_render_png(text=text, title=title, out_dir=self.img_dir, cfg=self.img_cfg, key_prefix="wf")
         if path is None:
-            yield event.chain_result([Comp.Plain("\u200b" + text)])
+            yield event.chain_result([Comp.Plain(text)])
             return
 
         yield event.chain_result([Comp.Image.fromFileSystem(str(path))])
@@ -171,11 +149,11 @@ class WarframeDatasourcePlugin(Star):
         try:
             from astrbot.api.event import MessageChain
 
-            await self.context.send_message(unified_msg_origin, MessageChain().message("\u200b" + text))
+            await self.context.send_message(unified_msg_origin, MessageChain().message(text))
             return True
         except Exception:
             try:
-                await self.context.send_message(unified_msg_origin, [Comp.Plain("\u200b" + text)])
+                await self.context.send_message(unified_msg_origin, [Comp.Plain(text)])
                 return True
             except Exception:
                 return False
@@ -200,7 +178,7 @@ class WarframeDatasourcePlugin(Star):
             if platform == "aiocqhttp":
                 cq = self._cq_at_code(user_id)
                 if cq is not None:
-                    with_at = [Comp.Plain(cq + "\u200b")] + base
+                    with_at = [Comp.Plain(cq)] + base
                     try:
                         await self.context.send_message(unified_msg_origin, with_at)
                         return True
@@ -209,7 +187,7 @@ class WarframeDatasourcePlugin(Star):
 
             at = self._try_build_at(user_id)
             if at is not None:
-                with_at = [at, Comp.Plain("\u200b")] + base
+                with_at = [at] + base
                 try:
                     await self.context.send_message(unified_msg_origin, with_at)
                     return True
@@ -226,7 +204,7 @@ class WarframeDatasourcePlugin(Star):
         if not self.img_cfg.enabled:
             return await self._push_plain_text(unified_msg_origin, text)
 
-        path = get_or_render_png(text=text, title=title, out_dir=self.img_dir, cfg=self.img_cfg, key_prefix="wf")
+        path = await get_or_render_png(text=text, title=title, out_dir=self.img_dir, cfg=self.img_cfg, key_prefix="wf")
         if path is None:
             return await self._push_plain_text(unified_msg_origin, text)
 
@@ -238,11 +216,11 @@ class WarframeDatasourcePlugin(Star):
 
     async def _push_to_subscriber(self, unified_msg_origin: str, *, platform: str | None, user_id: str | None, title: str, text: str) -> bool:
         if not self.img_cfg.enabled:
-            return await self._push_with_mention(unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Plain("\u200b" + text)])
+            return await self._push_with_mention(unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Plain(text)])
 
-        path = get_or_render_png(text=text, title=title, out_dir=self.img_dir, cfg=self.img_cfg, key_prefix="wf")
+        path = await get_or_render_png(text=text, title=title, out_dir=self.img_dir, cfg=self.img_cfg, key_prefix="wf")
         if path is None:
-            return await self._push_with_mention(unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Plain("\u200b" + text)])
+            return await self._push_with_mention(unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Plain(text)])
         return await self._push_with_mention(unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Image.fromFileSystem(str(path))])
 
     async def _start_background(self) -> None:
@@ -260,33 +238,35 @@ class WarframeDatasourcePlugin(Star):
             self._task = None
 
     async def _ensure_worldstate(self) -> dict | None:
-        ws = self.mgr.get_worldstate_cached()
+        ws = await self.mgr.get_worldstate_cached()
         if ws is None:
             await self.mgr.refresh_worldstate(snapshot=False)
-            ws = self.mgr.get_worldstate_cached()
+            ws = await self.mgr.get_worldstate_cached()
         return ws if isinstance(ws, dict) else None
 
-    def _build_nodes_map(self) -> dict[str, str]:
-        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
-        sol = build_nodes_map(self.mgr.get_mirror_cached("solnodes"))
+    async def _build_nodes_map(self) -> dict[str, str]:
+        nodes_raw = await self.mgr.get_mirror_cached("nodes")
+        sol_raw = await self.mgr.get_mirror_cached("solnodes")
+        nodes = build_nodes_map(nodes_raw)
+        sol = build_nodes_map(sol_raw)
         if sol:
             nodes.update(sol)
         if self._simplify_zh and nodes:
             nodes = {k: to_simplified_zh(v) for k, v in nodes.items() if isinstance(v, str)}
         return nodes
 
-    def _build_cycles_ws(self) -> dict[str, dict]:
-        def get(name: str) -> dict | None:
-            v = self.mgr.get_mirror_cached(name)
+    async def _build_cycles_ws(self) -> dict[str, dict]:
+        async def get(name: str) -> dict | None:
+            v = await self.mgr.get_mirror_cached(name)
             return v if isinstance(v, dict) else None
 
         out: dict[str, dict] = {}
-        earth = get("cycle_earth")
-        cetus = get("cycle_cetus")
-        vallis = get("cycle_vallis")
-        cambion = get("cycle_cambion")
-        zariman = get("cycle_zariman")
-        duviri = get("cycle_duviri")
+        earth = await get("cycle_earth")
+        cetus = await get("cycle_cetus")
+        vallis = await get("cycle_vallis")
+        cambion = await get("cycle_cambion")
+        zariman = await get("cycle_zariman")
+        duviri = await get("cycle_duviri")
         if earth:
             out["earthCycle"] = earth
         if cetus:
@@ -642,8 +622,8 @@ class WarframeDatasourcePlugin(Star):
             )
         return base_label + (" " + " ".join(extra) if extra else "")
 
-    def _topic_text(self, topic: str, ws: dict) -> tuple[str, str]:
-        nodes = self._build_nodes_map()
+    async def _topic_text(self, topic: str, ws: dict) -> tuple[str, str]:
+        nodes = await self._build_nodes_map()
         base, filters = self._parse_topic_id(topic)
 
         if base == "alerts":
@@ -674,12 +654,12 @@ class WarframeDatasourcePlugin(Star):
             desired = (filters.get("state") or "").lower() or None
             title = self._topic_label(topic) or "循环"
             ws2 = dict(ws)
-            ws2.update(self._build_cycles_ws())
+            ws2.update(await self._build_cycles_ws())
             msg = self._format_cycles_filtered(ws2, zone=zone, desired_state=desired)
             return title, msg
         if base == "duviri":
             ws2 = dict(ws)
-            ws2.update(self._build_cycles_ws())
+            ws2.update(await self._build_cycles_ws())
             return "轮换", format_duviri_cycle(ws2)
         if base == "nightwave":
             return "电波", format_nightwave(ws)
@@ -1002,11 +982,11 @@ class WarframeDatasourcePlugin(Star):
             await asyncio.sleep(30.0)
 
     async def _run_pre_reminders_once(self) -> None:
-        ws = self.mgr.get_worldstate_cached()
+        ws = await self.mgr.get_worldstate_cached()
         if not isinstance(ws, dict):
             ws = {}
         ws = dict(ws)
-        ws.update(self._build_cycles_ws())
+        ws.update(await self._build_cycles_ws())
 
         async with self._sub_lock:
             data = self._sub_store.load()
@@ -1258,7 +1238,7 @@ class WarframeDatasourcePlugin(Star):
         if not isinstance(ws, dict):
             return
         ws2 = dict(ws)
-        ws2.update(self._build_cycles_ws())
+        ws2.update(await self._build_cycles_ws())
 
         async with self._sub_lock:
             data = self._sub_store.load()
@@ -1279,7 +1259,7 @@ class WarframeDatasourcePlugin(Star):
 
         topic_payload: dict[str, tuple[str, str, str]] = {}
         for t in sorted(all_topics):
-            title, text = self._topic_text(t, ws2)
+            title, text = await self._topic_text(t, ws2)
             sig = self._topic_sig(t, ws2)
             topic_payload[t] = (title, text, sig)
 
@@ -1417,7 +1397,7 @@ class WarframeDatasourcePlugin(Star):
     @wf_group.command("更新", alias={"refresh", "update", "刷新"})
     async def wf_refresh(self, event: AstrMessageEvent):
         await self.mgr.refresh_all_once()
-        sol = build_nodes_map(self.mgr.get_mirror_cached("solnodes"))
+        sol = build_nodes_map(await self.mgr.get_mirror_cached("solnodes"))
         if not sol:
             yield event.plain_result("all systems online（提示：solnodes 未加载，节点可能显示为 SolNodeXXX；可用 /wf 调试 solnodes 查看）")
             return
@@ -1425,7 +1405,7 @@ class WarframeDatasourcePlugin(Star):
 
     @wf_group.command("状态", alias={"status", "info"})
     async def wf_status(self, event: AstrMessageEvent):
-        meta = self.mgr.get_worldstate_meta()
+        meta = await self.mgr.get_worldstate_meta()
         if not meta:
             yield event.plain_result("no cache yet, use /wf 更新")
             return
@@ -1438,7 +1418,7 @@ class WarframeDatasourcePlugin(Star):
     async def wf_debug(self, event: AstrMessageEvent, kind: str = "worldstate"):
         k = (kind or "worldstate").strip().lower()
         if k in {"worldstate", "ws"}:
-            ws = self.mgr.get_worldstate_cached()
+            ws = await self.mgr.get_worldstate_cached()
             if not isinstance(ws, dict):
                 yield event.plain_result("worldstate unavailable, use /wf 更新")
                 return
@@ -1449,8 +1429,8 @@ class WarframeDatasourcePlugin(Star):
             return
 
         if k in {"nodes", "solnodes", "mirrors"}:
-            nodes_raw = self.mgr.get_mirror_cached("nodes")
-            sol_raw = self.mgr.get_mirror_cached("solnodes")
+            nodes_raw = await self.mgr.get_mirror_cached("nodes")
+            sol_raw = await self.mgr.get_mirror_cached("solnodes")
             nodes_map = build_nodes_map(nodes_raw)
             sol_map = build_nodes_map(sol_raw)
             merged = dict(nodes_map)
@@ -1475,7 +1455,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = self._build_nodes_map()
+        nodes = await self._build_nodes_map()
         msg = format_alerts(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="警报", text=msg):
             yield r
@@ -1486,7 +1466,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = self._build_nodes_map()
+        nodes = await self._build_nodes_map()
         msg = format_invasions(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="入侵", text=msg):
             yield r
@@ -1497,7 +1477,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = self._build_nodes_map()
+        nodes = await self._build_nodes_map()
         k = self._normalize_fissure_kind(kind)
         msg = format_fissures(ws, nodes_map=nodes, kind=k)
         async for r in self._send_text_or_image(event, title=f"裂隙({k})", text=msg):
@@ -1509,7 +1489,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = self._build_nodes_map()
+        nodes = await self._build_nodes_map()
         msg = format_fissures(ws, nodes_map=nodes, kind="steel")
         async for r in self._send_text_or_image(event, title="钢铁裂隙", text=msg):
             yield r
@@ -1520,7 +1500,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = self._build_nodes_map()
+        nodes = await self._build_nodes_map()
         msg = format_fissures(ws, nodes_map=nodes, kind="storm")
         async for r in self._send_text_or_image(event, title="九重天裂隙", text=msg):
             yield r
@@ -1531,7 +1511,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = self._build_nodes_map()
+        nodes = await self._build_nodes_map()
         msg = format_void_trader(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="奸商", text=msg):
             yield r
@@ -1552,7 +1532,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = self._build_nodes_map()
+        nodes = await self._build_nodes_map()
         msg = format_sortie(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="突击", text=msg):
             yield r
@@ -1563,7 +1543,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = self._build_nodes_map()
+        nodes = await self._build_nodes_map()
         msg = format_archon_hunt(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="执刑官猎杀", text=msg):
             yield r
@@ -1574,7 +1554,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = self._build_nodes_map()
+        nodes = await self._build_nodes_map()
         msg = format_arbitration(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="仲裁", text=msg):
             yield r
@@ -1595,7 +1575,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             ws = {}
         ws2 = dict(ws)
-        ws2.update(self._build_cycles_ws())
+        ws2.update(await self._build_cycles_ws())
         msg = format_cycles(ws2)
         async for r in self._send_text_or_image(event, title="循环", text=msg):
             yield r
@@ -1606,7 +1586,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             ws = {}
         ws2 = dict(ws)
-        ws2.update(self._build_cycles_ws())
+        ws2.update(await self._build_cycles_ws())
         msg = format_duviri_cycle(ws2)
         async for r in self._send_text_or_image(event, title="轮换", text=msg):
             yield r
@@ -1677,7 +1657,7 @@ class WarframeDatasourcePlugin(Star):
         text = ""
         sig: str | None = None
         if ws is not None:
-            title, text = self._topic_text(t, ws)
+            title, text = await self._topic_text(t, ws)
             sig = self._topic_sig(t, ws)
 
         async with self._sub_lock:

@@ -6,8 +6,10 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class WarframeConfig:
-    # In AstrBot, set this via context.get_data_dir() / "warframe"
-    data_dir: Path = Path("./data/warframe")
+    # Data directory; in AstrBot plugins this should be resolved via StarTools.get_data_dir(<plugin_name>).
+    # This default is only for non-AstrBot ad-hoc usage; WarframeDataSource.create() will attempt to
+    # resolve a better default automatically.
+    data_dir: Path = Path(".")
 
     # Timeouts (seconds)
     connect_timeout: float = 5.0
@@ -35,6 +37,6 @@ class WarframeConfig:
     # Persistence backends
     # Note: some environments/filesystems can't support sqlite file locking; keep it optional.
     enable_sqlite: bool = False
-    sqlite_path: Path = Path("./data/warframe/storage.sqlite3")
+    sqlite_path: Path = Path("storage.sqlite3")
     enable_file_store: bool = True
 

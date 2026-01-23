@@ -25,6 +25,7 @@
   - `/wf 订阅 <项目>`（别名：`subscribe`、`关注`）
   - `/wf 取消订阅 <项目|全部>`（别名：`unsubscribe`、`退订`）
   - `/wf 订阅列表`（别名：`subs`、`list`）
+  - `/wf 清理图片缓存`（别名：`清图`、`clear_image_cache`）
 
 - 图片模式（可选）
   - 开启后，`/wf` 输出会渲染成图片发送
@@ -59,7 +60,7 @@
 - `public_export_language`：PublicExport 语言（如 `zh` / `en`）
 - `refresh.*`：各数据源刷新间隔（秒）
 - `retention.*`：清理保留策略
-- `render.*`：图片模式与图片缓存
+- `render.*`：图片模式与图片缓存（支持自定义宽度/字号/字体路径/emoji 处理方式）
 - `subscriptions.cycles_default_offset_minutes`：平原/循环订阅默认提前/后置分钟数（>0 提前，<0 后置）
 - `i18n.simplify_zh`：将繁体中文转换为简体（默认开启，主要用于 solNodes 等第三方数据源）
 

@@ -46,6 +46,18 @@ class WarframeDataSource:
     @classmethod
     def create(cls, config: WarframeConfig | None = None) -> "WarframeDataSource":
         cfg = config or WarframeConfig()
+        # Resolve a sensible default data_dir when used inside AstrBot.
+        if str(cfg.data_dir) in {".", ""}:
+            try:
+                from astrbot.api.star import StarTools  # type: ignore
+
+                cfg = WarframeConfig(**{**cfg.__dict__, "data_dir": Path(StarTools.get_data_dir("astrbot_plugin_wfbot")) / "warframe"})
+            except Exception:
+                cfg = WarframeConfig(**{**cfg.__dict__, "data_dir": Path(__file__).resolve().parent / ".plugin_data" / "warframe"})
+
+        # If sqlite_path is relative, place it under data_dir.
+        if not cfg.sqlite_path.is_absolute():
+            cfg = WarframeConfig(**{**cfg.__dict__, "sqlite_path": cfg.data_dir / cfg.sqlite_path})
         cache = FileCache(cfg.data_dir)
         http = HttpClient(
             connect_timeout=cfg.connect_timeout,

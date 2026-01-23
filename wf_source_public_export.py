@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import lzma
-import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from astrbot.api import logger  # type: ignore
+import aiofiles
+
 from .wf_cache import FileCache
 from .wf_http import HttpClient
-
-logger = logging.getLogger(__name__)
 
 PUBLIC_EXPORT_INDEX_URL = "https://origin.warframe.com/PublicExport/index_%s.txt.lzma"
 PUBLIC_EXPORT_MANIFEST_URL = "http://content.warframe.com/PublicExport/Manifest/%s"
@@ -85,10 +86,11 @@ class PublicExportClient:
                 )
 
             try:
-                raw = index_path.read_bytes()
+                async with aiofiles.open(index_path, "rb") as f:
+                    raw = await f.read()
                 if len(raw) < 32:
                     raise lzma.LZMAError("index file too small")
-                decompressed = lzma.decompress(raw)
+                decompressed = await asyncio.to_thread(lzma.decompress, raw)
                 break
             except (FileNotFoundError, lzma.LZMAError) as e:
                 logger.warning("public export index decompress failed (attempt=%s): %s", attempt + 1, e)
@@ -110,20 +112,23 @@ class PublicExportClient:
                 downloaded_files=[],
             )
 
-        index_text_path.parent.mkdir(parents=True, exist_ok=True)
-        index_text_path.write_bytes(decompressed)
+        await asyncio.to_thread(index_text_path.parent.mkdir, parents=True, exist_ok=True)
+        async with aiofiles.open(index_text_path, "wb") as f:
+            await f.write(decompressed)
 
-        index_lines = _parse_index_lines(index_text_path.read_text("utf-8", errors="replace"))
+        async with aiofiles.open(index_text_path, "r", encoding="utf-8", errors="replace") as f:
+            index_text = await f.read()
+        index_lines = _parse_index_lines(index_text)
         current_hashes = _hash_map(index_lines)
 
         hashes_file = self._cache.path("public_export", f"keys_{language}.json")
         old_hashes = {}
         if hashes_file.exists():
-            old = self._cache.read_json("public_export", f"keys_{language}.json")
+            old = await self._cache.read_json("public_export", f"keys_{language}.json")
             if isinstance(old, dict):
                 old_hashes = {str(k): str(v) for k, v in old.items()}
 
-        self._cache.write_json(current_hashes, "public_export", f"keys_{language}.json")
+        await self._cache.write_json(current_hashes, "public_export", f"keys_{language}.json")
 
         changed = [name for name, h in current_hashes.items() if old_hashes.get(name) != h]
         if not changed:
@@ -135,7 +140,7 @@ class PublicExportClient:
             )
 
         downloaded: list[str] = []
-        export_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(export_dir.mkdir, parents=True, exist_ok=True)
 
         for line in index_lines:
             filename = _extract_export_filename(line)

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
+
+import aiofiles
 
 
 @dataclass(frozen=True)
@@ -355,7 +358,7 @@ def render_text_to_png_bytes(text: str, *, title: str = 'Warframe', cfg: ImageRe
     return buf.getvalue()
 
 
-def get_or_render_png(
+async def get_or_render_png(
     *,
     text: str,
     title: str,
@@ -366,7 +369,7 @@ def get_or_render_png(
     if not cfg.enabled:
         return None
 
-    out_dir.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(out_dir.mkdir, parents=True, exist_ok=True)
     # Include render parameters to avoid stale cache after config changes (e.g. font size).
     key = _hash_text(
         "\n".join(
@@ -390,11 +393,12 @@ def get_or_render_png(
     if cfg.cache_images and path.exists():
         return path
 
-    data = render_text_to_png_bytes(text, title=title, cfg=cfg)
-    path.write_bytes(data)
+    data = await asyncio.to_thread(render_text_to_png_bytes, text, title=title, cfg=cfg)
+    async with aiofiles.open(path, "wb") as f:
+        await f.write(data)
 
     if cfg.cache_images and cfg.keep_images > 0:
-        _trim_png_cache(out_dir, keep=cfg.keep_images)
+        await asyncio.to_thread(_trim_png_cache, out_dir, keep=cfg.keep_images)
 
     return path
 

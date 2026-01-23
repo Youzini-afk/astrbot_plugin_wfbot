@@ -9,6 +9,7 @@ from typing import Any, Mapping, MutableMapping
 from urllib.parse import urlparse
 
 import aiohttp
+import aiofiles
 
 
 @dataclass(frozen=True)
@@ -109,8 +110,8 @@ class HttpClient:
         resp = await self.get(url, headers=headers)
         if 200 <= resp.status < 300:
             os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-            with open(out_path, "wb") as f:
-                f.write(resp.body)
+            async with aiofiles.open(out_path, "wb") as f:
+                await f.write(resp.body)
         return resp
 
     async def _session_for_url(self, url: str) -> aiohttp.ClientSession:

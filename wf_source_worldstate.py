@@ -217,10 +217,10 @@ class WorldStateClient:
         result = await self.fetch()
         if result.json is not None:
             # Keep both raw and parsed formats for flexibility.
-            self._cache.write_bytes(result.raw, "worldstate", "latest.json")
-            self._cache.write_json(result.json, "worldstate", "latest.parsed.json")
+            await self._cache.write_bytes(result.raw, "worldstate", "latest.json")
+            await self._cache.write_json(result.json, "worldstate", "latest.parsed.json")
         return result
 
-    def load_cached(self) -> Any | None:
-        return self._cache.read_json("worldstate", "latest.parsed.json")
+    async def load_cached(self) -> Any | None:
+        return await self._cache.read_json("worldstate", "latest.parsed.json")
 
