@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,12 +28,17 @@ from .wf_format import (
     format_void_trader,
     format_arbitration,
     format_archon_hunt,
+    mission_emoji,
+    translate_fissure_tier,
+    translate_mission_type,
 )
 from .wf_render import ImageRenderConfig, get_or_render_png
 from .wf_subscriptions import SubscriptionStore
+from .wf_i18n import to_simplified_zh
 
 
 PLUGIN_ID = "astrbot_plugin_wfbot"
+logger = logging.getLogger(__name__)
 
 
 @register("astrbot_plugin_wfbot", "astr_wfbot", "Warframe datasource manager", "0.1.0")
@@ -59,6 +65,10 @@ class WarframeDatasourcePlugin(Star):
         if not isinstance(subs_cfg, dict):
             subs_cfg = {}
 
+        i18n_cfg = self.config.get("i18n", {})
+        if not isinstance(i18n_cfg, dict):
+            i18n_cfg = {}
+
         wf_cfg = WarframeConfig(
             data_dir=data_dir,
             public_export_language=str(self.config.get("public_export_language", "zh")),
@@ -75,6 +85,14 @@ class WarframeDatasourcePlugin(Star):
             enabled=bool(render_cfg.get("enabled", self.config.get("image_mode", False))),
             cache_images=bool(render_cfg.get("cache_images", self.config.get("cache_images", False))),
             keep_images=int(render_cfg.get("keep_images", self.config.get("keep_image_cache", 10))),
+            width=int(render_cfg.get("width", 1080)),
+            font_size=int(render_cfg.get("font_size", 32)),
+            title_font_size=int(render_cfg.get("title_font_size", 40)),
+            pad=int(render_cfg.get("pad", 28)),
+            line_gap=int(render_cfg.get("line_gap", 10)),
+            font_cjk=(str(render_cfg.get("font_cjk")) if render_cfg.get("font_cjk") else None),
+            font_emoji=(str(render_cfg.get("font_emoji")) if render_cfg.get("font_emoji") else None),
+            emoji_mode=str(render_cfg.get("emoji_mode", "replace") or "replace"),
         )
         self.img_dir = data_dir / "images"
 
@@ -82,6 +100,7 @@ class WarframeDatasourcePlugin(Star):
         self.mgr = self.ds.create_manager()
 
         self._cycles_default_offset_seconds = int(subs_cfg.get("cycles_default_offset_minutes", 0)) * 60
+        self._simplify_zh = bool(i18n_cfg.get("simplify_zh", True))
 
         self._sub_lock = asyncio.Lock()
         self._sub_store = SubscriptionStore(data_dir / "subscriptions.json")
@@ -211,8 +230,11 @@ class WarframeDatasourcePlugin(Star):
         if path is None:
             return await self._push_plain_text(unified_msg_origin, text)
 
-        # If we reached here, an image exists but sending via MessageChain/component failed.
-        return await self._push_plain_text(unified_msg_origin, text)
+        try:
+            await self.context.send_message(unified_msg_origin, [Comp.Image.fromFileSystem(str(path))])
+            return True
+        except Exception:
+            return await self._push_plain_text(unified_msg_origin, text)
 
     async def _push_to_subscriber(self, unified_msg_origin: str, *, platform: str | None, user_id: str | None, title: str, text: str) -> bool:
         if not self.img_cfg.enabled:
@@ -243,6 +265,43 @@ class WarframeDatasourcePlugin(Star):
             await self.mgr.refresh_worldstate(snapshot=False)
             ws = self.mgr.get_worldstate_cached()
         return ws if isinstance(ws, dict) else None
+
+    def _build_nodes_map(self) -> dict[str, str]:
+        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
+        sol = build_nodes_map(self.mgr.get_mirror_cached("solnodes"))
+        if sol:
+            nodes.update(sol)
+        if self._simplify_zh and nodes:
+            nodes = {k: to_simplified_zh(v) for k, v in nodes.items() if isinstance(v, str)}
+        return nodes
+
+    def _build_cycles_ws(self) -> dict[str, dict]:
+        def get(name: str) -> dict | None:
+            v = self.mgr.get_mirror_cached(name)
+            return v if isinstance(v, dict) else None
+
+        out: dict[str, dict] = {}
+        earth = get("cycle_earth")
+        cetus = get("cycle_cetus")
+        vallis = get("cycle_vallis")
+        cambion = get("cycle_cambion")
+        zariman = get("cycle_zariman")
+        duviri = get("cycle_duviri")
+        if earth:
+            out["earthCycle"] = earth
+        if cetus:
+            out["cetusCycle"] = cetus
+        if vallis:
+            out["vallisCycle"] = vallis
+        if cambion:
+            out["cambionCycle"] = cambion
+        if zariman:
+            out["zarimanCycle"] = zariman
+        if duviri:
+            # keep both keys for compatibility
+            out["duviriCycle"] = duviri
+            out["duvalierCycle"] = duviri
+        return out
 
     def _parse_topic_id(self, topic_id: str) -> tuple[str, dict[str, str]]:
         if "|" not in topic_id:
@@ -324,6 +383,36 @@ class WarframeDatasourcePlugin(Star):
             if s in {self._norm_token(x) for x in names}:
                 return key
         return None
+
+    def _mission_key_from_code(self, code) -> str:
+        s = str(code or "").strip()
+        if not s:
+            return ""
+        s = s.upper()
+        if s.startswith("MT_"):
+            s = s[3:]
+        s = re.sub(r"[^A-Z0-9]+", "", s)
+        return s.lower()
+
+    def _tier_key_from_code(self, code) -> str:
+        s = str(code or "").strip()
+        if not s:
+            return ""
+        s0 = s.strip().lower().replace(" ", "").replace("_", "")
+        if s0 in {"lith", "meso", "neo", "axi", "requiem"}:
+            return s0
+        if s0 in {"voidt1"}:
+            return "lith"
+        if s0 in {"voidt2"}:
+            return "meso"
+        if s0 in {"voidt3"}:
+            return "neo"
+        if s0 in {"voidt4"}:
+            return "axi"
+        if s0 in {"voidt5"}:
+            return "requiem"
+        # VoidT6 (Omnia) / other values: keep raw normalized for non-filtered display only.
+        return s0
 
     def _normalize_cycle_zone_token(self, raw: str) -> str | None:
         s = self._norm_token(raw)
@@ -554,7 +643,7 @@ class WarframeDatasourcePlugin(Star):
         return base_label + (" " + " ".join(extra) if extra else "")
 
     def _topic_text(self, topic: str, ws: dict) -> tuple[str, str]:
-        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
+        nodes = self._build_nodes_map()
         base, filters = self._parse_topic_id(topic)
 
         if base == "alerts":
@@ -584,10 +673,14 @@ class WarframeDatasourcePlugin(Star):
             zone = (filters.get("zone") or "cetus").lower()
             desired = (filters.get("state") or "").lower() or None
             title = self._topic_label(topic) or "循环"
-            msg = self._format_cycles_filtered(ws, zone=zone, desired_state=desired)
+            ws2 = dict(ws)
+            ws2.update(self._build_cycles_ws())
+            msg = self._format_cycles_filtered(ws2, zone=zone, desired_state=desired)
             return title, msg
         if base == "duviri":
-            return "轮换", format_duviri_cycle(ws)
+            ws2 = dict(ws)
+            ws2.update(self._build_cycles_ws())
+            return "轮换", format_duviri_cycle(ws2)
         if base == "nightwave":
             return "电波", format_nightwave(ws)
         return self._topic_label(topic), f"{topic}: -"
@@ -610,10 +703,6 @@ class WarframeDatasourcePlugin(Star):
         if not isinstance(fiss, list):
             return "fissures: -"
 
-        def mt_norm(s: str) -> str:
-            s = (s or "").strip().lower().replace(" ", "").replace("_", "")
-            return s
-
         out = []
         for m in fiss:
             if not isinstance(m, dict):
@@ -625,29 +714,75 @@ class WarframeDatasourcePlugin(Star):
                 continue
 
             if tier:
-                t = (m.get("modifier") or m.get("tier") or "").strip().lower()
-                if t and t.lower() != tier.lower():
-                    continue
-                if not t:
+                t_code = m.get("modifier") or m.get("tier") or ""
+                t_key = self._tier_key_from_code(t_code)
+                if not t_key or t_key != tier.lower():
                     continue
 
             if mission:
-                mt = m.get("missionType") or ""
-                if mt_norm(str(mt)) != mission:
+                mt_code = m.get("missionType") or m.get("MissionType") or ""
+                mt_key = self._mission_key_from_code(mt_code)
+                if not mt_key or mt_key != mission.lower():
                     continue
 
             out.append(m)
 
-        lines = [f"fissures({kind}): {len(out)}"]
+        title = {"normal": "普通", "steel": "钢铁", "storm": "九重天"}.get(kind, kind)
+        filter_bits: list[str] = []
+        if mission:
+            filter_bits.append(
+                {
+                    "defense": "防御",
+                    "mobiledefense": "移动防御",
+                    "capture": "捕获",
+                    "survival": "生存",
+                    "exterminate": "歼灭",
+                    "interception": "拦截",
+                    "spy": "间谍",
+                    "rescue": "救援",
+                    "sabotage": "破坏",
+                    "excavation": "挖掘",
+                    "disruption": "扰乱",
+                }.get(mission, mission)
+            )
+        if tier:
+            filter_bits.append({"lith": "古纪", "meso": "中纪", "neo": "新纪", "axi": "后纪", "requiem": "安魂"}.get(tier, tier))
+        head = f"🌀 裂缝·{title}（{len(out)}）"
+        if filter_bits:
+            head = head + "｜过滤：" + " ".join(filter_bits)
+        lines = [head]
+        if not out:
+            lines.append("- 暂无符合条件的裂缝")
+            return "\n".join(lines)
         for m in out[:limit]:
             node = str(m.get("node") or m.get("location") or "-")
             if nodes_map and node in nodes_map:
                 node = nodes_map[node]
-            tier_s = m.get("modifier") or m.get("tier") or "-"
-            mt = m.get("missionType") or "-"
-            exp = m.get("expiry")
-            lines.append(f"- {node} tier={tier_s} type={mt} exp={exp}")
+            tier_code = m.get("modifier") or m.get("tier")
+            tier_zh = translate_fissure_tier(tier_code)
+            mtype_code = m.get("missionType") or m.get("MissionType")
+            mtype_zh = translate_mission_type(mtype_code)
+            em = mission_emoji(mtype_code)
+            eta = self._format_remaining(m.get("expiry"))
+            lines.append(f"- {node}｜{em}{mtype_zh}｜{tier_zh}｜⏳{eta}")
         return "\n".join(lines)
+
+    def _format_remaining(self, expiry) -> str:
+        ts = self._parse_expiry_ts(expiry)
+        if ts is None:
+            return "-"
+        now_ts = datetime.now(timezone.utc).timestamp()
+        secs = ts - now_ts
+        if secs <= 0:
+            return "已结束"
+        minutes = int(secs // 60)
+        if minutes < 60:
+            return f"{minutes}分"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}小时{minutes % 60}分"
+        days = hours // 24
+        return f"{days}天{hours % 24}小时"
 
     def _format_cycles_filtered(self, ws: dict, *, zone: str, desired_state: str | None) -> str:
         key = {
@@ -666,16 +801,64 @@ class WarframeDatasourcePlugin(Star):
             st = o.get("state")
             if isinstance(st, str) and st:
                 return st.strip().lower()
-            if "isDay" in o:
+            if key in {"earthCycle", "cetusCycle"} and "isDay" in o:
                 return "day" if bool(o.get("isDay")) else "night"
-            if "isWarm" in o:
+            if key == "vallisCycle" and "isWarm" in o:
                 return "warm" if bool(o.get("isWarm")) else "cold"
             return "-"
 
         st = state_of(obj)
-        exp = obj.get("expiry") or obj.get("endTime") or obj.get("timeLeft") or "-"
-        extra = f" desired={desired_state}" if desired_state else ""
-        return f"{key}: state={st} exp={exp}{extra}"
+        exp_raw = obj.get("expiry") or obj.get("endTime")
+        exp_ts = self._parse_expiry_ts(exp_raw)
+        now_ts = datetime.now(timezone.utc).timestamp()
+        delta = (exp_ts - now_ts) if exp_ts is not None else None
+
+        def fmt_delta(d: float | None) -> str:
+            if d is None:
+                tl = obj.get("timeLeft")
+                return str(tl) if tl else "-"
+            if d <= 0:
+                return "已结束"
+            minutes = int(d // 60)
+            if minutes < 60:
+                return f"{minutes}分"
+            hours = minutes // 60
+            if hours < 24:
+                return f"{hours}小时{minutes % 60}分"
+            days = hours // 24
+            return f"{days}天{hours % 24}小时"
+
+        def zone_title(z: str) -> str:
+            return {
+                "earth": "🌍 地球",
+                "cetus": "🌾 夜灵平原",
+                "vallis": "❄️ 福尔图娜",
+                "cambion": "🦠 魔胎之境",
+                "zariman": "🚢 扎里曼",
+            }.get(z, z)
+
+        def state_label(z: str, s: str) -> str:
+            if z in {"earth", "cetus"}:
+                return "☀️白天" if s == "day" else "🌙夜晚" if s == "night" else s
+            if z == "vallis":
+                return "🔥温暖" if s == "warm" else "❄️寒冷" if s == "cold" else s
+            if z == "cambion":
+                return "🟥Fass" if s == "fass" else "🟦Vome" if s == "vome" else s
+            if z == "zariman":
+                return f"⚔️{s}" if s else s
+            return s
+
+        title = zone_title(zone)
+        cur = state_label(zone, st)
+
+        if not desired_state:
+            return f"{title}｜当前：{cur}｜⏳{fmt_delta(delta)}"
+
+        des = state_label(zone, desired_state)
+        if st == desired_state:
+            return f"{title}｜当前：{cur}（已达成）"
+
+        return f"{title}｜当前：{cur}｜距离{des}：⏳{fmt_delta(delta)}"
 
     def _parse_expiry_ts(self, expiry) -> float | None:
         if expiry is None:
@@ -812,14 +995,18 @@ class WarframeDatasourcePlugin(Star):
         while True:
             try:
                 await self._run_pre_reminders_once()
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                pass
+                logger.exception("wf subscription tick loop error")
             await asyncio.sleep(30.0)
 
     async def _run_pre_reminders_once(self) -> None:
         ws = self.mgr.get_worldstate_cached()
         if not isinstance(ws, dict):
-            return
+            ws = {}
+        ws = dict(ws)
+        ws.update(self._build_cycles_ws())
 
         async with self._sub_lock:
             data = self._sub_store.load()
@@ -929,12 +1116,14 @@ class WarframeDatasourcePlugin(Star):
                 if kind == "normal" and hard is True:
                     continue
                 if tier:
-                    t = (m.get("modifier") or m.get("tier") or "").strip().lower()
-                    if not t or t != tier:
+                    t_code = m.get("modifier") or m.get("tier") or ""
+                    t_key = self._tier_key_from_code(t_code)
+                    if not t_key or t_key != tier:
                         continue
                 if mission:
-                    mt = str(m.get("missionType") or "").strip().lower().replace(" ", "").replace("_", "")
-                    if mt != mission:
+                    mt_code = m.get("missionType") or m.get("MissionType") or ""
+                    mt_key = self._mission_key_from_code(mt_code)
+                    if not mt_key or mt_key != mission:
                         continue
                 rows.append(
                     {
@@ -1068,6 +1257,8 @@ class WarframeDatasourcePlugin(Star):
         ws = payload.get("new")
         if not isinstance(ws, dict):
             return
+        ws2 = dict(ws)
+        ws2.update(self._build_cycles_ws())
 
         async with self._sub_lock:
             data = self._sub_store.load()
@@ -1088,8 +1279,8 @@ class WarframeDatasourcePlugin(Star):
 
         topic_payload: dict[str, tuple[str, str, str]] = {}
         for t in sorted(all_topics):
-            title, text = self._topic_text(t, ws)
-            sig = self._topic_sig(t, ws)
+            title, text = self._topic_text(t, ws2)
+            sig = self._topic_sig(t, ws2)
             topic_payload[t] = (title, text, sig)
 
         to_send: list[tuple[str, str | None, str | None, str, str, str, str | None]] = []
@@ -1109,7 +1300,7 @@ class WarframeDatasourcePlugin(Star):
             for t, meta in topics.items():
                 if not isinstance(t, str) or t not in topic_payload or not isinstance(meta, dict):
                     continue
-                if not self._topic_should_notify(t, ws):
+                if not self._topic_should_notify(t, ws2):
                     continue
                 last_sig = meta.get("last_sig")
                 title, text, sig = topic_payload[t]
@@ -1154,6 +1345,8 @@ class WarframeDatasourcePlugin(Star):
 
     @afilter.command("wf_stop", alias={"wf停止"})
     async def wf_stop_compat(self, event: AstrMessageEvent):
+        if self._sub_tick_task and not self._sub_tick_task.done():
+            self._sub_tick_task.cancel()
         await self.mgr.stop_async()
         yield event.plain_result("stopped")
 
@@ -1161,6 +1354,36 @@ class WarframeDatasourcePlugin(Star):
     @afilter.command_group("wf", alias={"战甲", "星际战甲", "warframe"})
     def wf_group(self):
         pass
+
+    @wf_group.command("停止", alias={"stop", "关闭", "停", "shutdown"})
+    async def wf_stop(self, event: AstrMessageEvent):
+        if self._sub_tick_task and not self._sub_tick_task.done():
+            self._sub_tick_task.cancel()
+        await self.mgr.stop_async()
+        yield event.plain_result("stopped")
+
+    @wf_group.command("清理图片缓存", alias={"清图", "清理图片", "清理缓存图片", "clear_images", "clear_image_cache"})
+    async def wf_clear_images(self, event: AstrMessageEvent):
+        try:
+            folder = self.img_dir
+            if not folder.exists():
+                yield event.plain_result("图片缓存目录不存在（无需清理）")
+                return
+            files = [p for p in folder.glob("*.png") if p.is_file()]
+            if not files:
+                yield event.plain_result("图片缓存为空（无需清理）")
+                return
+            removed = 0
+            for p in files:
+                try:
+                    p.unlink()
+                    removed += 1
+                except FileNotFoundError:
+                    pass
+            yield event.plain_result(f"已清理图片缓存：{removed} 张")
+        except Exception:
+            logger.exception("clear image cache failed")
+            yield event.plain_result("清理失败（请查看控制台日志）")
 
     @wf_group.command("帮助", alias={"help", "h", "菜单", "指令", "命令"})
     async def wf_help(self, event: AstrMessageEvent):
@@ -1185,6 +1408,7 @@ class WarframeDatasourcePlugin(Star):
             "- /wf 订阅 <项目> (subscribe)\n"
             "- /wf 取消订阅 <项目|全部> (unsubscribe)\n"
             "- /wf 订阅列表 (list)\n"
+            "- /wf 清理图片缓存 (clear image cache)\n"
             f"image_mode={self.img_cfg.enabled} cache_images={self.img_cfg.cache_images}"
         )
         async for r in self._send_text_or_image(event, title="/wf 帮助", text=msg):
@@ -1193,7 +1417,11 @@ class WarframeDatasourcePlugin(Star):
     @wf_group.command("更新", alias={"refresh", "update", "刷新"})
     async def wf_refresh(self, event: AstrMessageEvent):
         await self.mgr.refresh_all_once()
-        yield event.plain_result("ok")
+        sol = build_nodes_map(self.mgr.get_mirror_cached("solnodes"))
+        if not sol:
+            yield event.plain_result("all systems online（提示：solnodes 未加载，节点可能显示为 SolNodeXXX；可用 /wf 调试 solnodes 查看）")
+            return
+        yield event.plain_result("all systems online")
 
     @wf_group.command("状态", alias={"status", "info"})
     async def wf_status(self, event: AstrMessageEvent):
@@ -1206,13 +1434,48 @@ class WarframeDatasourcePlugin(Star):
         )
         yield event.plain_result(msg)
 
+    @wf_group.command("调试", alias={"debug"})
+    async def wf_debug(self, event: AstrMessageEvent, kind: str = "worldstate"):
+        k = (kind or "worldstate").strip().lower()
+        if k in {"worldstate", "ws"}:
+            ws = self.mgr.get_worldstate_cached()
+            if not isinstance(ws, dict):
+                yield event.plain_result("worldstate unavailable, use /wf 更新")
+                return
+            keys = sorted([str(x) for x in ws.keys()])
+            msg = "worldstate keys:\n" + "\n".join(keys[:80])
+            async for r in self._send_text_or_image(event, title="调试", text=msg):
+                yield r
+            return
+
+        if k in {"nodes", "solnodes", "mirrors"}:
+            nodes_raw = self.mgr.get_mirror_cached("nodes")
+            sol_raw = self.mgr.get_mirror_cached("solnodes")
+            nodes_map = build_nodes_map(nodes_raw)
+            sol_map = build_nodes_map(sol_raw)
+            merged = dict(nodes_map)
+            merged.update(sol_map)
+            sample_keys = ["SolNode26", "SolNode103", "SolNode147", "SettlementNode3"]
+            lines = [
+                f"mirrors.nodes={'ok' if nodes_raw is not None else 'missing'} size={len(nodes_map)}",
+                f"mirrors.solnodes={'ok' if sol_raw is not None else 'missing'} size={len(sol_map)}",
+                "sample:",
+            ]
+            for sk in sample_keys:
+                lines.append(f"- {sk} -> {merged.get(sk)}")
+            async for r in self._send_text_or_image(event, title="调试", text="\n".join(lines)):
+                yield r
+            return
+
+        yield event.plain_result("用法：/wf 调试 worldstate | /wf 调试 solnodes")
+
     @wf_group.command("警报", alias={"alerts", "alert"})
     async def wf_alerts(self, event: AstrMessageEvent):
         ws = await self._ensure_worldstate()
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
+        nodes = self._build_nodes_map()
         msg = format_alerts(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="警报", text=msg):
             yield r
@@ -1223,7 +1486,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
+        nodes = self._build_nodes_map()
         msg = format_invasions(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="入侵", text=msg):
             yield r
@@ -1234,7 +1497,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
+        nodes = self._build_nodes_map()
         k = self._normalize_fissure_kind(kind)
         msg = format_fissures(ws, nodes_map=nodes, kind=k)
         async for r in self._send_text_or_image(event, title=f"裂隙({k})", text=msg):
@@ -1246,7 +1509,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
+        nodes = self._build_nodes_map()
         msg = format_fissures(ws, nodes_map=nodes, kind="steel")
         async for r in self._send_text_or_image(event, title="钢铁裂隙", text=msg):
             yield r
@@ -1257,7 +1520,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
+        nodes = self._build_nodes_map()
         msg = format_fissures(ws, nodes_map=nodes, kind="storm")
         async for r in self._send_text_or_image(event, title="九重天裂隙", text=msg):
             yield r
@@ -1268,7 +1531,8 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        msg = format_void_trader(ws)
+        nodes = self._build_nodes_map()
+        msg = format_void_trader(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="奸商", text=msg):
             yield r
 
@@ -1288,7 +1552,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
+        nodes = self._build_nodes_map()
         msg = format_sortie(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="突击", text=msg):
             yield r
@@ -1299,7 +1563,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
+        nodes = self._build_nodes_map()
         msg = format_archon_hunt(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="执刑官猎杀", text=msg):
             yield r
@@ -1310,7 +1574,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        nodes = build_nodes_map(self.mgr.get_mirror_cached("nodes"))
+        nodes = self._build_nodes_map()
         msg = format_arbitration(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="仲裁", text=msg):
             yield r
@@ -1329,9 +1593,10 @@ class WarframeDatasourcePlugin(Star):
     async def wf_cycles(self, event: AstrMessageEvent):
         ws = await self._ensure_worldstate()
         if ws is None:
-            yield event.plain_result("worldstate unavailable, use /wf 更新")
-            return
-        msg = format_cycles(ws)
+            ws = {}
+        ws2 = dict(ws)
+        ws2.update(self._build_cycles_ws())
+        msg = format_cycles(ws2)
         async for r in self._send_text_or_image(event, title="循环", text=msg):
             yield r
 
@@ -1339,9 +1604,10 @@ class WarframeDatasourcePlugin(Star):
     async def wf_duviri(self, event: AstrMessageEvent):
         ws = await self._ensure_worldstate()
         if ws is None:
-            yield event.plain_result("worldstate unavailable, use /wf 更新")
-            return
-        msg = format_duviri_cycle(ws)
+            ws = {}
+        ws2 = dict(ws)
+        ws2.update(self._build_cycles_ws())
+        msg = format_duviri_cycle(ws2)
         async for r in self._send_text_or_image(event, title="轮换", text=msg):
             yield r
 
@@ -1377,20 +1643,26 @@ class WarframeDatasourcePlugin(Star):
             legacy = next((e for e in entries if e.unified_msg_origin == umo and e.user_id is None), None)
             cur_topics = sorted(list(cur.topics.keys())) if cur else []
             legacy_topics = sorted(list(legacy.topics.keys())) if legacy else []
-            msg = (
-                "用法：/wf 订阅 <项目> [过滤]\n"
-                "可选项目：警报 / 入侵 / 裂隙(裂缝) / 奸商 / 每日特惠 / 突击 / 执刑官猎杀 / 仲裁 / 钢铁奖励 / 平原(循环) / 轮换 / 电波\n"
-                "裂缝过滤示例：\n"
-                "- /wf 订阅 裂缝 钢铁 防御\n"
-                "- /wf 订阅 裂缝 九重天\n"
-                "- /wf 订阅 裂缝 古纪 捕获\n"
-                "平原过滤示例：\n"
-                "- /wf 订阅 夜灵平原 夜晚\n"
-                "- /wf 订阅 平原 夜晚\n"
-                "- /wf 订阅 夜灵平原 夜晚 10  (提前10分钟预提醒)\n"
-                f"当前用户订阅：{', '.join([self._topic_label(t) for t in cur_topics]) or '-'}\n"
-                f"旧版(仅会话)订阅：{', '.join([self._topic_label(t) for t in legacy_topics]) or '-'}"
-            )
+            lines = [
+                "用法：/wf 订阅 <项目> [过滤]",
+                "可选项目：警报 / 入侵 / 裂隙(裂缝) / 奸商 / 每日特惠 / 突击 / 执刑官猎杀 / 仲裁 / 钢铁奖励 / 平原(循环) / 轮换 / 电波",
+                "裂缝过滤示例：",
+                "- /wf 订阅 裂缝 钢铁 防御",
+                "- /wf 订阅 裂缝 九重天",
+                "- /wf 订阅 裂缝 古纪 捕获",
+                "平原过滤示例：",
+                "- /wf 订阅 夜灵平原 夜晚",
+                "- /wf 订阅 平原 夜晚",
+                "- /wf 订阅 夜灵平原 夜晚 10  (提前10分钟预提醒)",
+                "取消订阅：",
+                "- /wf 取消订阅 <项目>  (同样支持过滤，如：/wf 取消订阅 裂缝 钢铁 防御)",
+                "- /wf 取消订阅 全部",
+                "查看列表：/wf 订阅列表",
+                f"当前用户订阅：{', '.join([self._topic_label(t) for t in cur_topics]) or '-'}",
+            ]
+            if legacy_topics:
+                lines.append(f"旧版(仅会话)订阅：{', '.join([self._topic_label(t) for t in legacy_topics])}")
+            msg = "\n".join(lines)
             async for r in self._send_text_or_image(event, title="订阅", text=msg):
                 yield r
             return
@@ -1465,9 +1737,9 @@ class WarframeDatasourcePlugin(Star):
         legacy = next((e for e in entries if e.unified_msg_origin == umo and e.user_id is None), None)
         bound_topics = sorted(list(bound.topics.keys())) if bound else []
         legacy_topics = sorted(list(legacy.topics.keys())) if legacy else []
-        msg = (
-            f"当前用户订阅：{', '.join([self._topic_label(t) for t in bound_topics]) or '-'}\n"
-            f"旧版(仅会话)订阅：{', '.join([self._topic_label(t) for t in legacy_topics]) or '-'}"
-        )
+        lines = [f"当前用户订阅：{', '.join([self._topic_label(t) for t in bound_topics]) or '-'}"]
+        if legacy_topics:
+            lines.append(f"旧版(仅会话)订阅：{', '.join([self._topic_label(t) for t in legacy_topics])}")
+        msg = "\n".join(lines)
         async for r in self._send_text_or_image(event, title="订阅列表", text=msg):
             yield r

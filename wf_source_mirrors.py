@@ -88,4 +88,5 @@ class MirrorSourceFetcher:
             for t in tasks:
                 if not t.done():
                     t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 

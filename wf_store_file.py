@@ -105,6 +105,8 @@ class FileStore:
 
     def _write_event_history(self, data: dict[str, dict[str, int]]) -> None:
         path = self.base_dir / "event_history.json"
-        path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(path)
 
 

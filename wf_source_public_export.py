@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import lzma
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -8,6 +10,7 @@ from typing import Iterable
 from .wf_cache import FileCache
 from .wf_http import HttpClient
 
+logger = logging.getLogger(__name__)
 
 PUBLIC_EXPORT_INDEX_URL = "https://origin.warframe.com/PublicExport/index_%s.txt.lzma"
 PUBLIC_EXPORT_MANIFEST_URL = "http://content.warframe.com/PublicExport/Manifest/%s"
@@ -66,16 +69,47 @@ class PublicExportClient:
         export_dir = self._cache.path("public_export", "export")
 
         index_url = PUBLIC_EXPORT_INDEX_URL % language
-        resp = await self._http.download_to(index_url, str(index_path))
-        if not (200 <= resp.status < 300):
+        last_status = 0
+        decompressed: bytes | None = None
+        # index is sometimes served partially; if cached file becomes corrupted, delete and retry once.
+        for attempt in range(2):
+            url = index_url if attempt == 0 else f"{index_url}?t={int(time.time())}"
+            resp = await self._http.download_to(url, str(index_path))
+            last_status = int(resp.status or 0)
+            if not (200 <= resp.status < 300):
+                return PublicExportUpdateResult(
+                    language=language,
+                    index_status=resp.status,
+                    changed_files=[],
+                    downloaded_files=[],
+                )
+
+            try:
+                raw = index_path.read_bytes()
+                if len(raw) < 32:
+                    raise lzma.LZMAError("index file too small")
+                decompressed = lzma.decompress(raw)
+                break
+            except (FileNotFoundError, lzma.LZMAError) as e:
+                logger.warning("public export index decompress failed (attempt=%s): %s", attempt + 1, e)
+                try:
+                    index_path.unlink()
+                except FileNotFoundError:
+                    pass
+                try:
+                    index_text_path.unlink()
+                except FileNotFoundError:
+                    pass
+                decompressed = None
+
+        if decompressed is None:
             return PublicExportUpdateResult(
                 language=language,
-                index_status=resp.status,
+                index_status=last_status,
                 changed_files=[],
                 downloaded_files=[],
             )
 
-        decompressed = lzma.decompress(index_path.read_bytes())
         index_text_path.parent.mkdir(parents=True, exist_ok=True)
         index_text_path.write_bytes(decompressed)
 
@@ -118,7 +152,7 @@ class PublicExportClient:
 
         return PublicExportUpdateResult(
             language=language,
-            index_status=resp.status,
+            index_status=last_status,
             changed_files=changed,
             downloaded_files=downloaded,
         )

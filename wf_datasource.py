@@ -7,12 +7,19 @@ from .wf_config import WarframeConfig
 from .wf_http import HttpClient
 from .wf_urls import (
     WARFRAME_DATA_SOURCE_ALIAS,
+    WARFRAME_DATA_SOURCE_CAMBION_CYCLE,
+    WARFRAME_DATA_SOURCE_CETUS_CYCLE,
+    WARFRAME_DATA_SOURCE_DUVIRI_CYCLE,
+    WARFRAME_DATA_SOURCE_EARTH_CYCLE,
     WARFRAME_DATA_SOURCE_MARKET_RIVEN_TION,
     WARFRAME_DATA_SOURCE_MARKET_RIVEN_TION_ALIAS,
     WARFRAME_DATA_SOURCE_NODES,
     WARFRAME_DATA_SOURCE_REWARD_POOL,
     WARFRAME_DATA_SOURCE_RIVEN_ANALYSE_TREND,
+    WARFRAME_DATA_SOURCE_SOLNODES,
     WARFRAME_DATA_SOURCE_STATE_TRANSLATION,
+    WARFRAME_DATA_SOURCE_VALLIS_CYCLE,
+    WARFRAME_DATA_SOURCE_ZARIMAN_CYCLE,
 )
 from .wf_source_mirrors import MirrorSourceFetcher
 from .wf_source_public_export import PublicExportClient
@@ -72,10 +79,20 @@ class WarframeDataSource:
                 MirrorDataset("market_riven_tion", list(WARFRAME_DATA_SOURCE_MARKET_RIVEN_TION)),
                 MirrorDataset("market_riven_tion_alias", list(WARFRAME_DATA_SOURCE_MARKET_RIVEN_TION_ALIAS)),
                 MirrorDataset("nodes", list(WARFRAME_DATA_SOURCE_NODES)),
+                MirrorDataset("solnodes", list(WARFRAME_DATA_SOURCE_SOLNODES)),
                 MirrorDataset("reward_pool", list(WARFRAME_DATA_SOURCE_REWARD_POOL)),
                 MirrorDataset("riven_analyse_trend", list(WARFRAME_DATA_SOURCE_RIVEN_ANALYSE_TREND)),
                 MirrorDataset("state_translation", list(WARFRAME_DATA_SOURCE_STATE_TRANSLATION)),
             ]
         )
+        mgr.register_cycles(
+            [
+                MirrorDataset("cycle_earth", list(WARFRAME_DATA_SOURCE_EARTH_CYCLE)),
+                MirrorDataset("cycle_cetus", list(WARFRAME_DATA_SOURCE_CETUS_CYCLE)),
+                MirrorDataset("cycle_vallis", list(WARFRAME_DATA_SOURCE_VALLIS_CYCLE)),
+                MirrorDataset("cycle_cambion", list(WARFRAME_DATA_SOURCE_CAMBION_CYCLE)),
+                MirrorDataset("cycle_zariman", list(WARFRAME_DATA_SOURCE_ZARIMAN_CYCLE)),
+                MirrorDataset("cycle_duviri", list(WARFRAME_DATA_SOURCE_DUVIRI_CYCLE)),
+            ]
+        )
         return mgr
-

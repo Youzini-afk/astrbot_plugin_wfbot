@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+# Local render test artifacts
+render_test*.png

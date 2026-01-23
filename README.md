@@ -61,6 +61,7 @@
 - `retention.*`：清理保留策略
 - `render.*`：图片模式与图片缓存
 - `subscriptions.cycles_default_offset_minutes`：平原/循环订阅默认提前/后置分钟数（>0 提前，<0 后置）
+- `i18n.simplify_zh`：将繁体中文转换为简体（默认开启，主要用于 solNodes 等第三方数据源）
 
 ## 存储规范（对齐 AstrBot 官方）
 
@@ -69,3 +70,10 @@
 
 说明：旧版本配置字段仍保留但已隐藏（`invisible`），用于兼容历史配置。
 
+## 致谢
+
+本插件的数据获取与多镜像配置思路参考了 NyxBot 项目，在此对 NyxBot 的作者与贡献者表示感谢：
+
+- NyxBot：`https://github.com/KingPrimes/NyxBot`
+
+也感谢 Warframe 社区相关数据源与服务提供的公开接口（如 `warframestat`、`warframe.market` 等），使得插件能够稳定获取与展示游戏数据。

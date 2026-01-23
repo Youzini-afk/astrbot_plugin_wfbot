@@ -51,4 +51,44 @@ WARFRAME_DATA_SOURCE_STATE_TRANSLATION = [
     "https://kingprimes.top/warframe/state_translation.json",
 ]
 
+# SolNode name mapping (WarframeStat)
+WARFRAME_DATA_SOURCE_SOLNODES = [
+    "https://api.warframestat.us/solNodes?language=zh",
+    # Fallback proxy (returns a text header + JSON; handled by HttpResponse.json fallback parser)
+    "https://r.jina.ai/http://api.warframestat.us/solNodes?language=zh",
+    "https://r.jina.ai/https://api.warframestat.us/solNodes?language=zh",
+]
+
+# Cycles (WarframeStat, PC)
+WARFRAME_DATA_SOURCE_EARTH_CYCLE = [
+    "https://api.warframestat.us/pc/earthCycle?language=zh",
+    "https://r.jina.ai/http://api.warframestat.us/pc/earthCycle?language=zh",
+    "https://r.jina.ai/https://api.warframestat.us/pc/earthCycle?language=zh",
+]
+WARFRAME_DATA_SOURCE_CETUS_CYCLE = [
+    "https://api.warframestat.us/pc/cetusCycle?language=zh",
+    "https://r.jina.ai/http://api.warframestat.us/pc/cetusCycle?language=zh",
+    "https://r.jina.ai/https://api.warframestat.us/pc/cetusCycle?language=zh",
+]
+WARFRAME_DATA_SOURCE_VALLIS_CYCLE = [
+    "https://api.warframestat.us/pc/vallisCycle?language=zh",
+    "https://r.jina.ai/http://api.warframestat.us/pc/vallisCycle?language=zh",
+    "https://r.jina.ai/https://api.warframestat.us/pc/vallisCycle?language=zh",
+]
+WARFRAME_DATA_SOURCE_CAMBION_CYCLE = [
+    "https://api.warframestat.us/pc/cambionCycle?language=zh",
+    "https://r.jina.ai/http://api.warframestat.us/pc/cambionCycle?language=zh",
+    "https://r.jina.ai/https://api.warframestat.us/pc/cambionCycle?language=zh",
+]
+WARFRAME_DATA_SOURCE_ZARIMAN_CYCLE = [
+    "https://api.warframestat.us/pc/zarimanCycle?language=zh",
+    "https://r.jina.ai/http://api.warframestat.us/pc/zarimanCycle?language=zh",
+    "https://r.jina.ai/https://api.warframestat.us/pc/zarimanCycle?language=zh",
+]
+WARFRAME_DATA_SOURCE_DUVIRI_CYCLE = [
+    "https://api.warframestat.us/pc/duviriCycle?language=zh",
+    "https://r.jina.ai/http://api.warframestat.us/pc/duviriCycle?language=zh",
+    "https://r.jina.ai/https://api.warframestat.us/pc/duviriCycle?language=zh",
+]
+
 

@@ -21,7 +21,7 @@ from .wf_source_worldstate import WorldStateResult
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from wf_datasource import WarframeDataSource
+    from .wf_datasource import WarframeDataSource
 
 
 def _utcnow() -> datetime:
@@ -74,15 +74,20 @@ class WarframeDataManager:
         self._worldstate_lock = asyncio.Lock()
         self._public_export_lock = asyncio.Lock()
         self._mirrors_lock = asyncio.Lock()
+        self._cycles_lock = asyncio.Lock()
         self._market_lock = asyncio.Lock()
 
         self._mirrors: list[MirrorDataset] = []
+        self._cycles: list[MirrorDataset] = []
 
         self._worldstate_mem: Any | None = None
         self._worldstate_mem_at: float | None = None
 
     def register_mirrors(self, datasets: Iterable[MirrorDataset]) -> None:
         self._mirrors = list(datasets)
+
+    def register_cycles(self, datasets: Iterable[MirrorDataset]) -> None:
+        self._cycles = list(datasets)
 
     async def refresh_worldstate(self, *, snapshot: bool = True) -> WorldStateResult:
         async with self._worldstate_lock:
@@ -193,6 +198,13 @@ class WarframeDataManager:
                 result = await self._ds.mirrors.fetch_first_json(ds.urls)
                 out[ds.name] = result.json
                 if result.json is None:
+                    meta = {
+                        "fetched_at": _utcnow().isoformat(),
+                        "url": result.url,
+                        "status": result.status,
+                        "sha256": None,
+                    }
+                    self._cache.write_json(meta, "mirrors", ds.name, "latest.meta.json")
                     continue
 
                 raw = _json_bytes(result.json) if isinstance(result.json, (dict, list)) else str(result.json).encode("utf-8", errors="replace")
@@ -237,6 +249,24 @@ class WarframeDataManager:
                         },
                     )
 
+            return out
+
+    async def refresh_cycles(self) -> dict[str, Any]:
+        async with self._cycles_lock:
+            out: dict[str, Any] = {}
+            for ds in self._cycles:
+                result = await self._ds.mirrors.fetch_first_json(ds.urls)
+                out[ds.name] = result.json
+                if result.json is None:
+                    meta = {"fetched_at": _utcnow().isoformat(), "url": result.url, "status": result.status, "sha256": None}
+                    self._cache.write_json(meta, "mirrors", ds.name, "latest.meta.json")
+                    continue
+
+                raw = _json_bytes(result.json) if isinstance(result.json, (dict, list)) else str(result.json).encode("utf-8", errors="replace")
+                sha = hashlib.sha256(raw).hexdigest()
+                meta = {"fetched_at": _utcnow().isoformat(), "url": result.url, "status": result.status, "sha256": sha}
+                self._cache.write_json(result.json, "mirrors", ds.name, "latest.json")
+                self._cache.write_json(meta, "mirrors", ds.name, "latest.meta.json")
             return out
 
     async def refresh_market_bootstrap(self) -> dict[str, int]:
@@ -298,15 +328,37 @@ class WarframeDataManager:
         await self._ds.aclose()
 
     async def refresh_all_once(self) -> None:
-        await self.refresh_worldstate(snapshot=True)
-        await self.refresh_public_export()
-        await self.refresh_mirrors()
-        await self.refresh_market_bootstrap()
+        try:
+            await self.refresh_worldstate(snapshot=True)
+        except Exception:
+            logger.exception("refresh_worldstate failed")
+
+        try:
+            await self.refresh_public_export()
+        except Exception:
+            logger.exception("refresh_public_export failed")
+
+        try:
+            await self.refresh_cycles()
+        except Exception:
+            logger.exception("refresh_cycles failed")
+
+        try:
+            await self.refresh_mirrors()
+        except Exception:
+            logger.exception("refresh_mirrors failed")
+
+        try:
+            await self.refresh_market_bootstrap()
+        except Exception:
+            logger.exception("refresh_market_bootstrap failed")
+
         self.cleanup()
 
     async def _run_loop(self) -> None:
         next_worldstate = 0.0
         next_public_export = 0.0
+        next_cycles = 0.0
         next_mirrors = 0.0
         next_market = 0.0
         next_cleanup = 0.0
@@ -316,7 +368,9 @@ class WarframeDataManager:
             try:
                 if self._cfg.worldstate_refresh_interval > 0 and now >= next_worldstate:
                     await self.refresh_worldstate(snapshot=True)
+                    await self.refresh_cycles()
                     next_worldstate = now + float(self._cfg.worldstate_refresh_interval)
+                    next_cycles = next_worldstate
 
                 if self._cfg.public_export_refresh_interval > 0 and now >= next_public_export:
                     await self.refresh_public_export()
@@ -325,6 +379,11 @@ class WarframeDataManager:
                 if self._cfg.mirrors_refresh_interval > 0 and now >= next_mirrors:
                     await self.refresh_mirrors()
                     next_mirrors = now + float(self._cfg.mirrors_refresh_interval)
+
+                # In case worldstate interval is disabled, still refresh cycles periodically.
+                if self._cfg.worldstate_refresh_interval <= 0 and now >= next_cycles:
+                    await self.refresh_cycles()
+                    next_cycles = now + 600.0
 
                 if self._cfg.market_bootstrap_refresh_interval > 0 and now >= next_market:
                     await self.refresh_market_bootstrap()

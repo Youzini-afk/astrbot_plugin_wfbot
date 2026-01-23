@@ -81,6 +81,55 @@
         "default": 10,
         "description": "图片缓存保留数量",
         "hint": "仅在开启图片缓存时生效；超过数量会自动裁剪。"
+      },
+      "width": {
+        "type": "int",
+        "default": 1080,
+        "description": "图片宽度（像素）",
+        "hint": "宽度越大越不容易换行，但图片更大；建议 900~1400。"
+      },
+      "font_size": {
+        "type": "int",
+        "default": 32,
+        "description": "正文字号（像素）",
+        "hint": "默认字体会自动探测系统字体；字号过大可能导致图片过高。"
+      },
+      "title_font_size": {
+        "type": "int",
+        "default": 40,
+        "description": "标题字号（像素）",
+        "hint": "图片第一行标题字号。"
+      },
+      "pad": {
+        "type": "int",
+        "default": 28,
+        "description": "内边距（像素）",
+        "hint": "图片四周留白。"
+      },
+      "line_gap": {
+        "type": "int",
+        "default": 10,
+        "description": "行间距（像素）",
+        "hint": "每行之间的间隔。"
+      },
+      "font_cjk": {
+        "type": "string",
+        "default": "",
+        "description": "中文字体文件路径（可选）",
+        "hint": "留空则自动探测（Windows 常用：C:\\\\Windows\\\\Fonts\\\\msyh.ttc / simhei.ttf）。"
+      },
+      "font_emoji": {
+        "type": "string",
+        "default": "",
+        "description": "Emoji 字体文件路径（可选）",
+        "hint": "留空则自动探测（Windows 常用：C:\\\\Windows\\\\Fonts\\\\seguiemj.ttf）。"
+      },
+      "emoji_mode": {
+        "type": "string",
+        "default": "replace",
+        "options": ["replace", "keep", "strip"],
+        "description": "图片模式下 Emoji 处理方式",
+        "hint": "replace=将常用 emoji 替换为可渲染符号并移除其余；keep=尽量保留（可能出现方块/乱码，取决于系统字体）；strip=直接移除。"
       }
     }
   },
@@ -93,6 +142,18 @@
         "default": 0,
         "description": "平原/循环订阅默认提前/后置分钟数（>0 提前，<0 后置）",
         "hint": "当你执行“/wf 订阅 夜灵平原 夜晚”且未指定时间（如 10/提前10/后置10）时，使用此默认值；0 表示仅在指令显式指定时才提醒。"
+      }
+    }
+  },
+  "i18n": {
+    "type": "object",
+    "description": "语言与显示",
+    "items": {
+      "simplify_zh": {
+        "type": "bool",
+        "default": true,
+        "description": "将繁体中文转换为简体中文",
+        "hint": "部分第三方数据源（如 warframestat solNodes）返回繁体；开启后会使用 OpenCC(t2s) 在本地转换。"
       }
     }
   },

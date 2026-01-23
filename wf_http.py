@@ -22,7 +22,19 @@ class HttpResponse:
         return self.body.decode(encoding, errors=errors)
 
     def json(self) -> Any:
-        return json.loads(self.body.decode("utf-8", errors="replace"))
+        text = self.body.decode("utf-8", errors="replace")
+        try:
+            return json.loads(text)
+        except Exception:
+            # Some proxy endpoints (e.g. r.jina.ai) wrap JSON with a text header.
+            # Fall back to parsing from the first JSON-looking character.
+            idx_obj = text.find("{")
+            idx_arr = text.find("[")
+            idxs = [i for i in (idx_obj, idx_arr) if i != -1]
+            if not idxs:
+                raise
+            start = min(idxs)
+            return json.loads(text[start:])
 
 
 class HttpClient:
