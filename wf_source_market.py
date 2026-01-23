@@ -4,7 +4,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from wf_http import HttpClient
+from .wf_http import HttpClient
 
 
 Platform = Literal["pc", "ps4", "xbox", "switch", "mobile"]

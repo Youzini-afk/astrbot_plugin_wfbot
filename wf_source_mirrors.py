@@ -5,7 +5,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Sequence
 
-from wf_http import HttpClient
+from .wf_http import HttpClient
 
 
 @dataclass(frozen=True)

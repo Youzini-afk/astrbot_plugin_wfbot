@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from wf_cache import FileCache
-from wf_config import WarframeConfig
-from wf_http import HttpClient
-from wf_urls import (
+from .wf_cache import FileCache
+from .wf_config import WarframeConfig
+from .wf_http import HttpClient
+from .wf_urls import (
     WARFRAME_DATA_SOURCE_ALIAS,
     WARFRAME_DATA_SOURCE_MARKET_RIVEN_TION,
     WARFRAME_DATA_SOURCE_MARKET_RIVEN_TION_ALIAS,
@@ -14,10 +14,10 @@ from wf_urls import (
     WARFRAME_DATA_SOURCE_RIVEN_ANALYSE_TREND,
     WARFRAME_DATA_SOURCE_STATE_TRANSLATION,
 )
-from wf_source_mirrors import MirrorSourceFetcher
-from wf_source_public_export import PublicExportClient
-from wf_source_market import WarframeMarketClient
-from wf_source_worldstate import WorldStateClient
+from .wf_source_mirrors import MirrorSourceFetcher
+from .wf_source_public_export import PublicExportClient
+from .wf_source_market import WarframeMarketClient
+from .wf_source_worldstate import WorldStateClient
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ class WarframeDataSource:
         """
         Returns a WarframeDataManager pre-registered with NyxBot-style mirror datasets.
         """
-        from wf_manager import MirrorDataset, WarframeDataManager
+        from .wf_manager import MirrorDataset, WarframeDataManager
 
         mgr = WarframeDataManager(self)
         mgr.register_mirrors(

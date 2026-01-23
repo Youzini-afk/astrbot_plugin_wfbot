@@ -4,7 +4,7 @@
     "default": "zh",
     "options": ["zh", "en"],
     "description": "PublicExport 语言",
-    "hint": "用于下载官方 PublicExport index_<lang>.txt.lzma"
+    "hint": "用于下载官方 PublicExport（index_<lang>.txt.lzma）；建议与使用场景一致：中文=zh，英文=en。"
   },
   "refresh": {
     "type": "object",
@@ -13,22 +13,26 @@
       "worldstate": {
         "type": "int",
         "default": 600,
-        "description": "worldState.php 刷新间隔"
+        "description": "WorldState 刷新间隔（秒）",
+        "hint": "Warframe 世界状态（活动/裂缝/入侵等）数据刷新频率；过小可能触发限流。"
       },
       "public_export": {
         "type": "int",
         "default": 21600,
-        "description": "PublicExport 刷新间隔"
+        "description": "PublicExport 刷新间隔（秒）",
+        "hint": "官方静态数据（物品/词条等）更新频率较低，建议 6~24 小时。"
       },
       "mirrors": {
         "type": "int",
         "default": 21600,
-        "description": "镜像数据源刷新间隔"
+        "description": "镜像数据源刷新间隔（秒）",
+        "hint": "NyxBot 风格的多镜像 JSON 数据（节点名、翻译等）。"
       },
       "market_bootstrap": {
         "type": "int",
         "default": 86400,
-        "description": "warframe.market 列表数据刷新间隔"
+        "description": "warframe.market 列表数据刷新间隔（秒）",
+        "hint": "用于预拉取 market 的 items 等基础数据；不建议过于频繁。"
       }
     }
   },
@@ -39,17 +43,20 @@
       "cleanup_days": {
         "type": "int",
         "default": 14,
-        "description": "保留天数（快照/缓存/图片缓存）"
+        "description": "保留天数（快照/缓存/图片缓存）",
+        "hint": "清理策略：删除超过该天数的历史快照/缓存文件。"
       },
       "keep_worldstate_snapshots": {
         "type": "int",
         "default": 24,
-        "description": "worldstate 快照保留数量"
+        "description": "WorldState 快照保留数量",
+        "hint": "每次 worldstate 更新会保存一个快照；超过数量会自动裁剪。"
       },
       "keep_mirror_snapshots": {
         "type": "int",
         "default": 10,
-        "description": "每个 mirror 数据集快照保留数量"
+        "description": "每个 mirror 数据集快照保留数量",
+        "hint": "对每个镜像数据集分别保留 N 份历史快照。"
       }
     }
   },
@@ -60,17 +67,32 @@
       "enabled": {
         "type": "bool",
         "default": false,
-        "description": "将 /wf 输出渲染为图片"
+        "description": "将 /wf 输出渲染为图片",
+        "hint": "开启后，文本会本地渲染成 PNG 发送；适合长文本/排版。"
       },
       "cache_images": {
         "type": "bool",
         "default": false,
-        "description": "缓存渲染后的图片到磁盘"
+        "description": "缓存渲染后的图片到磁盘",
+        "hint": "开启后，相同内容会复用缓存图片（节省渲染耗时，增加磁盘占用）。"
       },
       "keep_images": {
         "type": "int",
         "default": 10,
-        "description": "图片缓存保留数量"
+        "description": "图片缓存保留数量",
+        "hint": "仅在开启图片缓存时生效；超过数量会自动裁剪。"
+      }
+    }
+  },
+  "subscriptions": {
+    "type": "object",
+    "description": "订阅推送",
+    "items": {
+      "cycles_default_offset_minutes": {
+        "type": "int",
+        "default": 0,
+        "description": "平原/循环订阅默认提前/后置分钟数（>0 提前，<0 后置）",
+        "hint": "当你执行“/wf 订阅 夜灵平原 夜晚”且未指定时间（如 10/提前10/后置10）时，使用此默认值；0 表示仅在指令显式指定时才提醒。"
       }
     }
   },

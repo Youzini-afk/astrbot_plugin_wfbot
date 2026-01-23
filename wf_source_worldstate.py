@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from wf_cache import FileCache
-from wf_http import HttpClient
+from .wf_cache import FileCache
+from .wf_http import HttpClient
 
 
 WARFRAME_WORLD_STATE_URL = "https://api.warframe.com/cdn/worldState.php"

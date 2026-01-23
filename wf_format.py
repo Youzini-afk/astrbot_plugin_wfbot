@@ -34,7 +34,6 @@ def _node_name(node: str, nodes_map: dict[str, str] | None) -> str:
 
 
 def build_nodes_map(nodes_dataset: Any) -> dict[str, str]:
-    # NyxBot nodes.json is a list; normalize to {nodeId: "name(system)"}
     out: dict[str, str] = {}
     if isinstance(nodes_dataset, list):
         for it in nodes_dataset:
@@ -74,7 +73,6 @@ def format_fissures(ws: dict, nodes_map: dict[str, str] | None = None, *, kind: 
     if not isinstance(fiss, list):
         return "fissures: -"
 
-    # Filter by hard flag for steel path
     if kind == "steel":
         fiss = [m for m in fiss if isinstance(m, dict) and m.get("hard") is True]
     elif kind == "normal":
@@ -123,3 +121,93 @@ def format_void_trader(ws: dict) -> str:
     loc = v.get("location") or "-"
     exp = _ts_iso(v.get("expiry"))
     return f"voidTrader: active={active} location={loc} exp={exp}"
+
+
+def format_daily_deals(ws: dict, limit: int = 8) -> str:
+    deals = _g(ws, "dailyDeals", default=[])
+    if not isinstance(deals, list):
+        return "dailyDeals: -"
+    lines = [f"dailyDeals: {len(deals)}"]
+    for d in deals[:limit]:
+        if not isinstance(d, dict):
+            continue
+        item = d.get("item") or "-"
+        price = d.get("salePrice") or d.get("originalPrice") or "-"
+        exp = _ts_iso(d.get("expiry"))
+        lines.append(f"- {item} price={price} exp={exp}")
+    return "\n".join(lines)
+
+
+def format_sortie(ws: dict, nodes_map: dict[str, str] | None = None) -> str:
+    s = ws.get("sortie")
+    if not isinstance(s, dict):
+        return "sortie: -"
+    boss = s.get("boss") or "-"
+    exp = _ts_iso(s.get("expiry"))
+    lines = [f"sortie: boss={boss} exp={exp}"]
+    variants = s.get("variants")
+    if isinstance(variants, list):
+        for v in variants:
+            if not isinstance(v, dict):
+                continue
+            node = _node_name(str(v.get("node") or "-"), nodes_map)
+            mtype = v.get("missionType") or "-"
+            mod = v.get("modifier") or "-"
+            lines.append(f"- {node} {mtype} {mod}")
+    return "\n".join(lines)
+
+
+def format_archon_hunt(ws: dict, nodes_map: dict[str, str] | None = None) -> str:
+    # field name varies by worldstate model; try common keys
+    hunt = ws.get("liteSortie") or ws.get("archonHunt")
+    if not isinstance(hunt, dict):
+        return "archon: -"
+    boss = hunt.get("boss") or hunt.get("bossName") or "-"
+    exp = _ts_iso(hunt.get("expiry"))
+    lines = [f"archon: boss={boss} exp={exp}"]
+    missions = hunt.get("missions") or hunt.get("variants")
+    if isinstance(missions, list):
+        for m in missions:
+            if not isinstance(m, dict):
+                continue
+            node = _node_name(str(m.get("node") or m.get("location") or "-"), nodes_map)
+            mtype = m.get("missionType") or "-"
+            lines.append(f"- {node} {mtype}")
+    return "\n".join(lines)
+
+
+def format_arbitration(ws: dict, nodes_map: dict[str, str] | None = None) -> str:
+    arb = ws.get("arbitration")
+    if not isinstance(arb, dict):
+        return "arbitration: -"
+    node = _node_name(str(arb.get("node") or "-"), nodes_map)
+    mtype = arb.get("type") or arb.get("missionType") or "-"
+    exp = _ts_iso(arb.get("expiry"))
+    return f"arbitration: {node} type={mtype} exp={exp}"
+
+
+def format_steel_path(ws: dict) -> str:
+    sp = ws.get("steelPath") or ws.get("steelPathOffering")
+    if not isinstance(sp, dict):
+        return "steelPath: -"
+    exp = _ts_iso(sp.get("expiry"))
+    rotation = sp.get("rotation") or sp.get("name") or "-"
+    return f"steelPath: rotation={rotation} exp={exp}"
+
+
+def format_duviri_cycle(ws: dict) -> str:
+    d = ws.get("duvalierCycle")
+    if not isinstance(d, dict):
+        return "duviri: -"
+    state = d.get("state") or d.get("id") or "-"
+    exp = _ts_iso(d.get("expiry"))
+    return f"duviri: state={state} exp={exp}"
+
+
+def format_nightwave(ws: dict) -> str:
+    n = ws.get("seasonInfo") or ws.get("nightwave")
+    if not isinstance(n, dict):
+        return "nightwave: -"
+    tag = n.get("tag") or n.get("season") or "-"
+    exp = _ts_iso(n.get("expiry"))
+    return f"nightwave: {tag} exp={exp}"

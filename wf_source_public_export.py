@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from wf_cache import FileCache
-from wf_http import HttpClient
+from .wf_cache import FileCache
+from .wf_http import HttpClient
 
 
 PUBLIC_EXPORT_INDEX_URL = "https://origin.warframe.com/PublicExport/index_%s.txt.lzma"
