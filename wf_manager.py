@@ -123,7 +123,8 @@ class WarframeDataManager:
             if self._store is not None:
                 put = getattr(self._store, "put_snapshot", None)
                 if callable(put):
-                    put(
+                    await asyncio.to_thread(
+                        put,
                         source="warframe",
                         name="worldstate",
                         status=result.status,
@@ -229,7 +230,8 @@ class WarframeDataManager:
                 if self._store is not None:
                     put = getattr(self._store, "put_snapshot", None)
                     if callable(put):
-                        put(
+                        await asyncio.to_thread(
+                            put,
                             source="mirrors",
                             name=ds.name,
                             status=int(result.status or 0),
@@ -287,7 +289,16 @@ class WarframeDataManager:
                 if self._store is not None:
                     put = getattr(self._store, "put_snapshot", None)
                     if callable(put):
-                        put(source="market", name=name, status=resp.status, url=resp.url, sha256=sha, json_obj=resp.json, raw=raw)
+                        await asyncio.to_thread(
+                            put,
+                            source="market",
+                            name=name,
+                            status=resp.status,
+                            url=resp.url,
+                            sha256=sha,
+                            json_obj=resp.json,
+                            raw=raw,
+                        )
                 saved[name] = 1
 
             await store("items", await self._ds.market.get_items())
@@ -311,6 +322,9 @@ class WarframeDataManager:
             if callable(prune):
                 prune(retention_days=self._cfg.cleanup_retention_days)
 
+    async def cleanup_async(self) -> None:
+        await asyncio.to_thread(self.cleanup)
+
     async def start_async(self) -> None:
         if self._task and not self._task.done():
             return
@@ -327,7 +341,7 @@ class WarframeDataManager:
         if self._store is not None:
             close = getattr(self._store, "close", None)
             if callable(close):
-                close()
+                await asyncio.to_thread(close)
         await self._ds.aclose()
 
     async def refresh_all_once(self) -> None:
@@ -356,7 +370,7 @@ class WarframeDataManager:
         except Exception:
             logger.exception("refresh_market_bootstrap failed")
 
-        await asyncio.to_thread(self.cleanup)
+        await self.cleanup_async()
 
     async def _run_loop(self) -> None:
         next_worldstate = 0.0
@@ -393,7 +407,7 @@ class WarframeDataManager:
                     next_market = now + float(self._cfg.market_bootstrap_refresh_interval)
 
                 if now >= next_cleanup:
-                    await asyncio.to_thread(self.cleanup)
+                    await self.cleanup_async()
                     next_cleanup = now + 6 * 3600.0
             except Exception:
                 logger.exception("warframe data manager loop error")
@@ -451,6 +465,9 @@ class WarframeDataManager:
             return
         wanted = {str(k) for k in hashes.keys()}
         export_dir = self._cache.path("public_export", "export")
+        await asyncio.to_thread(self._cleanup_public_export_orphans_sync, export_dir, wanted)
+
+    def _cleanup_public_export_orphans_sync(self, export_dir: Path, wanted: set[str]) -> None:
         if not export_dir.exists():
             return
         for p in export_dir.glob("*.json"):

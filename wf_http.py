@@ -56,6 +56,7 @@ class HttpClient:
         no_proxy_suffixes: tuple[str, ...] = ("warframe.com",),
         retries: int = 2,
         retry_backoff_seconds: float = 2.0,
+        max_request_time_seconds: float | None = 30.0,
     ) -> None:
         self._timeout = aiohttp.ClientTimeout(total=max(connect_timeout, read_timeout))
         self._user_agent = user_agent or (
@@ -65,17 +66,23 @@ class HttpClient:
         self._no_proxy_suffixes = tuple(no_proxy_suffixes)
         self._retries = int(max(0, retries))
         self._retry_backoff_seconds = float(max(0.0, retry_backoff_seconds))
+        self._max_request_time_seconds = None if max_request_time_seconds is None else float(max(0.0, max_request_time_seconds))
 
         self._session_env: aiohttp.ClientSession | None = None
         self._session_direct: aiohttp.ClientSession | None = None
 
     async def aclose(self) -> None:
-        if self._session_env is not None:
-            await self._session_env.close()
-            self._session_env = None
-        if self._session_direct is not None:
-            await self._session_direct.close()
-            self._session_direct = None
+        sessions = [self._session_env, self._session_direct]
+        self._session_env = None
+        self._session_direct = None
+        for s in sessions:
+            if s is None:
+                continue
+            try:
+                await s.close()
+            except Exception:
+                # best-effort close
+                pass
 
     async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> HttpResponse:
         request_headers: MutableMapping[str, str] = {
@@ -89,6 +96,7 @@ class HttpClient:
             request_headers.update(headers)
 
         attempt = 0
+        start_ts = time.monotonic()
         while True:
             attempt += 1
             try:
@@ -102,6 +110,8 @@ class HttpClient:
                         url=str(resp.url),
                     )
             except (aiohttp.ClientError, asyncio.TimeoutError):
+                if self._max_request_time_seconds is not None and (time.monotonic() - start_ts) >= self._max_request_time_seconds:
+                    raise
                 if attempt > (1 + self._retries):
                     raise
                 await asyncio.sleep(self._retry_backoff_seconds)
@@ -109,7 +119,7 @@ class HttpClient:
     async def download_to(self, url: str, out_path: str, *, headers: Mapping[str, str] | None = None) -> HttpResponse:
         resp = await self.get(url, headers=headers)
         if 200 <= resp.status < 300:
-            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            await asyncio.to_thread(os.makedirs, os.path.dirname(out_path) or ".", exist_ok=True)
             async with aiofiles.open(out_path, "wb") as f:
                 await f.write(resp.body)
         return resp

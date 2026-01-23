@@ -53,6 +53,34 @@
 2. 在 AstrBot 的 WebUI → 插件管理 → 重载插件
 3. AstrBot 会根据本插件的 `requirements.txt` 自动安装依赖（包含 `aiohttp` 和 `Pillow`）
 
+## 更新与推送（GitHub）
+
+如果你已经创建并上传过仓库，后续更新通常是下面这套流程（PowerShell）：
+
+```powershell
+cd E:\cursor_project\astrbot_plugin_wfbot
+git status
+git add .
+git commit -m "feat: xxx"   # 自己改成合适的说明
+git push origin main
+```
+
+如果你执行了 `git push` 但 GitHub 没变化，常见原因：
+
+- 你没有产生新的提交（`git status` 为空 / `git push` 提示 `Everything up-to-date`）
+- 你提交在别的分支（`git branch` 看看当前分支是不是 `main`）
+- remote 不对（`git remote -v` 确认 `origin` 指向你的仓库）
+
+## 如何验证订阅会 @ 你
+
+在 QQ（`aiocqhttp`）下，本插件会优先使用 CQ 码 `@`，其它平台会优雅降级为普通消息。
+
+建议用“平原/循环预提醒”来快速触发一次推送：
+
+1. 先订阅：`/wf 订阅 夜灵平原 夜晚 提前1`
+2. 等到夜灵平原即将切换到夜晚前 1 分钟（或者把 `subscriptions.cycles_default_offset_minutes` 设为 1，然后直接 `/wf 订阅 夜灵平原 夜晚`）
+3. 观察是否收到带 `@` 的推送消息
+
 ## 配置（WebUI）
 
 插件根目录的 `_conf_schema.json` 会在 WebUI 自动生成配置页。

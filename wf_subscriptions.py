@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import aiofiles
+from astrbot.api import logger  # type: ignore
 
 
 def _utcnow_iso() -> str:
@@ -27,12 +31,14 @@ class SubscriptionStore:
     def path(self) -> Path:
         return self._path
 
-    def load(self) -> dict[str, Any]:
+    async def load(self) -> dict[str, Any]:
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
+            async with aiofiles.open(self._path, "r", encoding="utf-8") as f:
+                data = json.loads(await f.read())
         except FileNotFoundError:
             return {"version": 2, "items": []}
         except Exception:
+            logger.debug("subscription store load failed: %s", self._path, exc_info=True)
             return {"version": 2, "items": []}
         if not isinstance(data, dict):
             return {"version": 2, "items": []}
@@ -69,13 +75,14 @@ class SubscriptionStore:
             data["items"] = []
         return data
 
-    def save(self, data: dict[str, Any]) -> None:
+    async def save(self, data: dict[str, Any]) -> None:
         data = dict(data)
         data["version"] = 2
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(self._path.parent.mkdir, parents=True, exist_ok=True)
         tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self._path)
+        async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
+            await f.write(json.dumps(data, ensure_ascii=False, indent=2))
+        await asyncio.to_thread(tmp.replace, self._path)
 
     def list_entries(self, data: dict[str, Any]) -> list[SubscriptionEntry]:
         items = data.get("items")

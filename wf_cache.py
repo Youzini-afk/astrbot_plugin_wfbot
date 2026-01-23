@@ -18,10 +18,11 @@ class FileCache:
 
     async def read_bytes(self, *parts: str) -> bytes | None:
         p = self.path(*parts)
-        if not p.exists():
+        try:
+            async with aiofiles.open(p, "rb") as f:
+                return await f.read()
+        except FileNotFoundError:
             return None
-        async with aiofiles.open(p, "rb") as f:
-            return await f.read()
 
     async def write_bytes(self, data: bytes, *parts: str) -> Path:
         p = self.path(*parts)

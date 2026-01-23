@@ -95,11 +95,11 @@ class PublicExportClient:
             except (FileNotFoundError, lzma.LZMAError) as e:
                 logger.warning("public export index decompress failed (attempt=%s): %s", attempt + 1, e)
                 try:
-                    index_path.unlink()
+                    await asyncio.to_thread(index_path.unlink)
                 except FileNotFoundError:
                     pass
                 try:
-                    index_text_path.unlink()
+                    await asyncio.to_thread(index_text_path.unlink)
                 except FileNotFoundError:
                     pass
                 decompressed = None
@@ -123,7 +123,7 @@ class PublicExportClient:
 
         hashes_file = self._cache.path("public_export", f"keys_{language}.json")
         old_hashes = {}
-        if hashes_file.exists():
+        if await asyncio.to_thread(hashes_file.exists):
             old = await self._cache.read_json("public_export", f"keys_{language}.json")
             if isinstance(old, dict):
                 old_hashes = {str(k): str(v) for k, v in old.items()}

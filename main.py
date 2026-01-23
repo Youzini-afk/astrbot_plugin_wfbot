@@ -119,8 +119,8 @@ class WarframeDatasourcePlugin(Star):
             from astrbot.api.star import StarTools  # type: ignore
 
             return Path(StarTools.get_data_dir(PLUGIN_ID))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("StarTools.get_data_dir failed: %s", e)
 
         # Fallback: official path helper (older docs): data/plugin_data/<plugin_name>/
         try:
@@ -128,8 +128,8 @@ class WarframeDatasourcePlugin(Star):
 
             plugin_name = str(getattr(self, "name", PLUGIN_ID) or PLUGIN_ID)
             return Path(get_astrbot_data_path()) / "plugin_data" / plugin_name
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("get_astrbot_data_path fallback failed: %s", e)
         # Last resort: use plugin-local folder (best effort).
         return Path(__file__).resolve().parent / ".plugin_data"
 
@@ -448,13 +448,7 @@ class WarframeDatasourcePlugin(Star):
             return None
         return int(minutes * 60)
 
-    def _normalize_sub_topic_args(self, topic: str | None, *mods: str) -> str | None:
-        t0 = self._norm_token(topic or "")
-        args = [m for m in mods if (m or "").strip()]
-        if not t0:
-            return None
-
-        # non-fissure topics (single token)
+    def _normalize_sub_topic_non_fissure(self, t0: str, args: list[str], *, topic_raw: str) -> str | None:
         if t0 in {"警报", "alert", "alerts"}:
             return "alerts"
         if t0 in {"入侵", "invasion", "invasions"}:
@@ -471,9 +465,14 @@ class WarframeDatasourcePlugin(Star):
             return "arbitration"
         if t0 in {"钢铁奖励", "steelreward", "steel_path", "steelpathreward"}:
             return "steel_path"
+        if t0 in {"轮换", "双衍王境", "duviri"}:
+            return "duviri"
+        if t0 in {"电波", "nightwave"}:
+            return "nightwave"
+
         if t0 in {"平原", "循环", "cycles", "cetus", "vallis", "cambion", "zariman", "夜灵平原", "夜灵平野", "地球", "福尔图娜", "魔胎之境", "扎里曼"}:
             base = "cycles"
-            zone = self._normalize_cycle_zone_token(topic or "") or "cetus"
+            zone = self._normalize_cycle_zone_token(topic_raw) or "cetus"
             state: str | None = None
             lead_seconds: int | None = None
             for a in args:
@@ -498,12 +497,10 @@ class WarframeDatasourcePlugin(Star):
             if lead_seconds is not None and state:
                 filters["lead"] = str(int(lead_seconds))
             return self._make_topic_id(base, filters)
-        if t0 in {"轮换", "双衍王境", "duviri"}:
-            return "duviri"
-        if t0 in {"电波", "nightwave"}:
-            return "nightwave"
 
-        # fissures with optional filters
+        return None
+
+    def _normalize_sub_topic_fissures(self, t0: str, args: list[str], *, topic_raw: str) -> str | None:
         if t0 in {"裂隙", "裂缝", "fissure", "fissures"}:
             base = "fissures"
             filters: dict[str, str] = {"kind": "normal"}
@@ -523,8 +520,7 @@ class WarframeDatasourcePlugin(Star):
                 return None
             return self._make_topic_id(base, filters)
 
-        # allow direct kind command words as topic
-        kind = self._normalize_fissure_kind_token(topic or "")
+        kind = self._normalize_fissure_kind_token(topic_raw)
         if kind:
             filters = {"kind": kind}
             for a in args:
@@ -538,6 +534,22 @@ class WarframeDatasourcePlugin(Star):
                     continue
                 return None
             return self._make_topic_id("fissures", filters)
+
+        return None
+
+    def _normalize_sub_topic_args(self, topic: str | None, *mods: str) -> str | None:
+        t0 = self._norm_token(topic or "")
+        args = [m for m in mods if (m or "").strip()]
+        if not t0:
+            return None
+
+        non_f = self._normalize_sub_topic_non_fissure(t0, args, topic_raw=str(topic or ""))
+        if non_f is not None:
+            return non_f
+
+        fiss = self._normalize_sub_topic_fissures(t0, args, topic_raw=str(topic or ""))
+        if fiss is not None:
+            return fiss
 
         return None
 
@@ -854,7 +866,10 @@ class WarframeDatasourcePlugin(Star):
                 return None
             s = s.replace("Z", "+00:00")
             try:
-                return datetime.fromisoformat(s).timestamp()
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp()
             except Exception:
                 return None
         return None
@@ -989,7 +1004,7 @@ class WarframeDatasourcePlugin(Star):
         ws.update(await self._build_cycles_ws())
 
         async with self._sub_lock:
-            data = self._sub_store.load()
+            data = await self._sub_store.load()
 
         items = data.get("items")
         if not isinstance(items, list) or not items:
@@ -1033,7 +1048,7 @@ class WarframeDatasourcePlugin(Star):
             return
 
         async with self._sub_lock:
-            data2 = self._sub_store.load()
+            data2 = await self._sub_store.load()
             changed = False
             for umo, uid, topic, _ in sent:
                 pr = self._cycles_pre_reminder(topic, ws)
@@ -1042,7 +1057,7 @@ class WarframeDatasourcePlugin(Star):
                 _, _, pre_sig = pr
                 changed = self._sub_store.set_last_pre_sig(data2, umo=umo, uid=uid, topic=topic, sig=pre_sig) or changed
             if changed:
-                self._sub_store.save(data2)
+                await self._sub_store.save(data2)
 
     def _topic_sig(self, topic: str, ws: dict) -> str:
         def h(obj) -> str:
@@ -1241,7 +1256,7 @@ class WarframeDatasourcePlugin(Star):
         ws2.update(await self._build_cycles_ws())
 
         async with self._sub_lock:
-            data = self._sub_store.load()
+            data = await self._sub_store.load()
 
         items = data.get("items")
         if not isinstance(items, list) or not items:
@@ -1300,12 +1315,12 @@ class WarframeDatasourcePlugin(Star):
             return
 
         async with self._sub_lock:
-            data2 = self._sub_store.load()
+            data2 = await self._sub_store.load()
             changed = False
             for umo, uid, topic, sig in sent:
                 changed = self._sub_store.set_last_sig(data2, umo=umo, uid=uid, topic=topic, sig=sig) or changed
             if changed:
-                self._sub_store.save(data2)
+                await self._sub_store.save(data2)
 
     def _normalize_fissure_kind(self, kind: str | None) -> str:
         k = (kind or "normal").strip().lower()
@@ -1344,15 +1359,10 @@ class WarframeDatasourcePlugin(Star):
 
     @wf_group.command("清理图片缓存", alias={"清图", "清理图片", "清理缓存图片", "clear_images", "clear_image_cache"})
     async def wf_clear_images(self, event: AstrMessageEvent):
-        try:
-            folder = self.img_dir
+        def _clear_sync(folder: Path) -> int:
             if not folder.exists():
-                yield event.plain_result("图片缓存目录不存在（无需清理）")
-                return
+                return -1
             files = [p for p in folder.glob("*.png") if p.is_file()]
-            if not files:
-                yield event.plain_result("图片缓存为空（无需清理）")
-                return
             removed = 0
             for p in files:
                 try:
@@ -1360,6 +1370,17 @@ class WarframeDatasourcePlugin(Star):
                     removed += 1
                 except FileNotFoundError:
                     pass
+            return removed
+
+        try:
+            folder = self.img_dir
+            removed = await asyncio.to_thread(_clear_sync, folder)
+            if removed < 0:
+                yield event.plain_result("图片缓存目录不存在（无需清理）")
+                return
+            if removed == 0:
+                yield event.plain_result("图片缓存为空（无需清理）")
+                return
             yield event.plain_result(f"已清理图片缓存：{removed} 张")
         except Exception:
             logger.exception("clear image cache failed")
@@ -1617,7 +1638,7 @@ class WarframeDatasourcePlugin(Star):
 
         if not topic.strip():
             async with self._sub_lock:
-                data = self._sub_store.load()
+                data = await self._sub_store.load()
                 entries = self._sub_store.list_entries(data)
             cur = next((e for e in entries if e.unified_msg_origin == umo and e.user_id == uid), None)
             legacy = next((e for e in entries if e.unified_msg_origin == umo and e.user_id is None), None)
@@ -1661,11 +1682,11 @@ class WarframeDatasourcePlugin(Star):
             sig = self._topic_sig(t, ws)
 
         async with self._sub_lock:
-            data = self._sub_store.load()
+            data = await self._sub_store.load()
             added = self._sub_store.upsert_topic(data, umo=umo, uid=uid, topic=t, user_name=uname, platform=platform_name)
             if sig is not None:
                 self._sub_store.set_last_sig(data, umo=umo, uid=uid, topic=t, sig=sig)
-            self._sub_store.save(data)
+            await self._sub_store.save(data)
 
         if added:
             yield event.plain_result(f"已订阅：{title}")
@@ -1686,10 +1707,10 @@ class WarframeDatasourcePlugin(Star):
         s = (topic or "").strip()
         if not s or s in {"全部", "all", "All"}:
             async with self._sub_lock:
-                data = self._sub_store.load()
+                data = await self._sub_store.load()
                 changed = self._sub_store.clear_umo(data, umo=umo, uid=uid, include_legacy=True)
                 if changed:
-                    self._sub_store.save(data)
+                    await self._sub_store.save(data)
             yield event.plain_result("已取消本会话全部订阅" if changed else "本会话暂无订阅")
             return
 
@@ -1699,10 +1720,10 @@ class WarframeDatasourcePlugin(Star):
             return
 
         async with self._sub_lock:
-            data = self._sub_store.load()
+            data = await self._sub_store.load()
             changed = self._sub_store.remove_topic(data, umo=umo, uid=uid, topic=t)
             if changed:
-                self._sub_store.save(data)
+                await self._sub_store.save(data)
 
         yield event.plain_result(f"已取消订阅：{self._topic_label(t)}" if changed else f"未订阅：{self._topic_label(t)}")
 
@@ -1711,7 +1732,7 @@ class WarframeDatasourcePlugin(Star):
         umo = event.unified_msg_origin
         uid = str(event.get_sender_id())
         async with self._sub_lock:
-            data = self._sub_store.load()
+            data = await self._sub_store.load()
             entries = self._sub_store.list_entries(data)
         bound = next((e for e in entries if e.unified_msg_origin == umo and e.user_id == uid), None)
         legacy = next((e for e in entries if e.unified_msg_origin == umo and e.user_id is None), None)

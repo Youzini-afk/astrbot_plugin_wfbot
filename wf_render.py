@@ -390,8 +390,12 @@ async def get_or_render_png(
     name = f"{_safe_filename(key_prefix)}_{key}.png"
     path = out_dir / name
 
-    if cfg.cache_images and path.exists():
-        return path
+    if cfg.cache_images:
+        try:
+            if await asyncio.to_thread(path.exists):
+                return path
+        except Exception:
+            pass
 
     data = await asyncio.to_thread(render_text_to_png_bytes, text, title=title, cfg=cfg)
     async with aiofiles.open(path, "wb") as f:
