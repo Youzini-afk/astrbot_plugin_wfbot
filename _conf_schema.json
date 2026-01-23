@@ -36,6 +36,30 @@
       }
     }
   },
+  "http": {
+    "type": "object",
+    "description": "网络与代理",
+    "items": {
+      "max_request_time_seconds": {
+        "type": "int",
+        "default": 30,
+        "description": "单次请求最长耗时（秒）",
+        "hint": "包含重试在内的总耗时上限；到达上限会抛出异常并在下次刷新再试。"
+      },
+      "no_proxy_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "对部分域名禁用系统代理（NyxBot 风格）",
+        "hint": "NyxBot 默认对 *.warframe.com 直连（trust_env=false）。如果你的网络环境必须走代理才能访问 warframe.com，请关闭该选项。"
+      },
+      "no_proxy_suffixes": {
+        "type": "list",
+        "default": ["warframe.com"],
+        "description": "直连域名后缀列表",
+        "hint": "仅在开启“禁用系统代理”时生效；命中后缀的域名将直连（不使用系统代理）。"
+      }
+    }
+  },
   "retention": {
     "type": "object",
     "description": "存储与清理",

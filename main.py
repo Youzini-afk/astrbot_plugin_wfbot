@@ -64,9 +64,27 @@ class WarframeDatasourcePlugin(Star):
         if not isinstance(subs_cfg, dict):
             subs_cfg = {}
 
+        http_cfg = self.config.get("http", {})
+        if not isinstance(http_cfg, dict):
+            http_cfg = {}
+
         i18n_cfg = self.config.get("i18n", {})
         if not isinstance(i18n_cfg, dict):
             i18n_cfg = {}
+
+        max_req_time = http_cfg.get("max_request_time_seconds", 30)
+        try:
+            max_req_time_f: float | None = float(max_req_time)
+            if max_req_time_f <= 0:
+                max_req_time_f = None
+        except Exception:
+            max_req_time_f = 30.0
+
+        no_proxy_suffixes_raw = http_cfg.get("no_proxy_suffixes", ["warframe.com"])
+        if isinstance(no_proxy_suffixes_raw, list):
+            no_proxy_suffixes = tuple(str(x).strip() for x in no_proxy_suffixes_raw if str(x).strip())
+        else:
+            no_proxy_suffixes = ("warframe.com",)
 
         wf_cfg = WarframeConfig(
             data_dir=data_dir,
@@ -78,6 +96,9 @@ class WarframeDatasourcePlugin(Star):
             cleanup_retention_days=int(retention_cfg.get("cleanup_days", self.config.get("cleanup_retention_days", 14))),
             keep_worldstate_snapshots=int(retention_cfg.get("keep_worldstate_snapshots", self.config.get("keep_worldstate_snapshots", 24))),
             keep_mirror_snapshots=int(retention_cfg.get("keep_mirror_snapshots", self.config.get("keep_mirror_snapshots", 10))),
+            http_max_request_time_seconds=max_req_time_f,
+            http_no_proxy_enabled=bool(http_cfg.get("no_proxy_enabled", True)),
+            http_no_proxy_suffixes=no_proxy_suffixes,
         )
 
         self.img_cfg = ImageRenderConfig(
@@ -95,7 +116,7 @@ class WarframeDatasourcePlugin(Star):
         )
         self.img_dir = data_dir / "images"
 
-        self.ds = WarframeDataSource.create(wf_cfg)
+        self.ds = WarframeDataSource.create(wf_cfg, plugin_id=PLUGIN_ID)
         self.mgr = self.ds.create_manager()
 
         self._cycles_default_offset_seconds = int(subs_cfg.get("cycles_default_offset_minutes", 0)) * 60
@@ -1623,7 +1644,7 @@ class WarframeDatasourcePlugin(Star):
             yield r
 
     @wf_group.command("订阅", alias={"subscribe", "关注"})
-    async def wf_subscribe(self, event: AstrMessageEvent, topic: str = "", a1: str = "", a2: str = "", a3: str = ""):
+    async def wf_subscribe(self, event: AstrMessageEvent, topic: str = "", filter1: str = "", filter2: str = "", filter3: str = ""):
         self._maybe_start_background()
         umo = event.unified_msg_origin
         uid = str(event.get_sender_id())
@@ -1668,7 +1689,7 @@ class WarframeDatasourcePlugin(Star):
                 yield r
             return
 
-        t = self._normalize_sub_topic_args(topic, a1, a2, a3)
+        t = self._normalize_sub_topic_args(topic, filter1, filter2, filter3)
         if t is None:
             yield event.plain_result("未知订阅项，先用 /wf 订阅 查看可选项目")
             return
@@ -1700,7 +1721,7 @@ class WarframeDatasourcePlugin(Star):
             yield event.plain_result("worldstate unavailable, use /wf 更新")
 
     @wf_group.command("取消订阅", alias={"unsubscribe", "退订"})
-    async def wf_unsubscribe(self, event: AstrMessageEvent, topic: str = "全部", a1: str = "", a2: str = "", a3: str = ""):
+    async def wf_unsubscribe(self, event: AstrMessageEvent, topic: str = "全部", filter1: str = "", filter2: str = "", filter3: str = ""):
         self._maybe_start_background()
         umo = event.unified_msg_origin
         uid = str(event.get_sender_id())
@@ -1714,7 +1735,7 @@ class WarframeDatasourcePlugin(Star):
             yield event.plain_result("已取消本会话全部订阅" if changed else "本会话暂无订阅")
             return
 
-        t = self._normalize_sub_topic_args(s, a1, a2, a3)
+        t = self._normalize_sub_topic_args(s, filter1, filter2, filter3)
         if t is None:
             yield event.plain_result("未知订阅项，先用 /wf 订阅 查看可选项目")
             return

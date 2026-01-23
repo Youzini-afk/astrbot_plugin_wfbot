@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from .wf_cache import FileCache
 from .wf_config import WarframeConfig
@@ -44,14 +45,14 @@ class WarframeDataSource:
     market: WarframeMarketClient
 
     @classmethod
-    def create(cls, config: WarframeConfig | None = None) -> "WarframeDataSource":
+    def create(cls, config: WarframeConfig | None = None, *, plugin_id: str = "astrbot_plugin_wfbot") -> "WarframeDataSource":
         cfg = config or WarframeConfig()
         # Resolve a sensible default data_dir when used inside AstrBot.
         if str(cfg.data_dir) in {".", ""}:
             try:
                 from astrbot.api.star import StarTools  # type: ignore
 
-                cfg = WarframeConfig(**{**cfg.__dict__, "data_dir": Path(StarTools.get_data_dir("astrbot_plugin_wfbot")) / "warframe"})
+                cfg = WarframeConfig(**{**cfg.__dict__, "data_dir": Path(StarTools.get_data_dir(plugin_id)) / "warframe"})
             except Exception:
                 cfg = WarframeConfig(**{**cfg.__dict__, "data_dir": Path(__file__).resolve().parent / ".plugin_data" / "warframe"})
 
@@ -64,6 +65,8 @@ class WarframeDataSource:
             read_timeout=cfg.read_timeout,
             retries=cfg.retries,
             retry_backoff_seconds=cfg.retry_backoff_seconds,
+            max_request_time_seconds=cfg.http_max_request_time_seconds,
+            no_proxy_suffixes=cfg.http_no_proxy_suffixes if cfg.http_no_proxy_enabled else (),
         )
         return cls(
             config=cfg,

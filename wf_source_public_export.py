@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import lzma
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ from .wf_http import HttpClient
 
 PUBLIC_EXPORT_INDEX_URL = "https://origin.warframe.com/PublicExport/index_%s.txt.lzma"
 PUBLIC_EXPORT_MANIFEST_URL = "http://content.warframe.com/PublicExport/Manifest/%s"
+
+_SAFE_EXPORT_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,240}\.json$", re.IGNORECASE)
 
 
 def _parse_index_lines(text: str) -> list[str]:
@@ -32,6 +35,19 @@ def _extract_export_filename(index_key_line: str) -> str:
     if "!" in index_key_line:
         return index_key_line.split("!", 1)[0]
     return index_key_line
+
+
+def _sanitize_export_filename(name: str) -> str | None:
+    s = (name or "").strip()
+    if not s:
+        return None
+    if "/" in s or "\\" in s:
+        return None
+    if ".." in s:
+        return None
+    if not _SAFE_EXPORT_FILENAME_RE.fullmatch(s):
+        return None
+    return s
 
 
 def _hash_map(index_lines: Iterable[str]) -> dict[str, str]:
@@ -141,15 +157,27 @@ class PublicExportClient:
 
         downloaded: list[str] = []
         await asyncio.to_thread(export_dir.mkdir, parents=True, exist_ok=True)
+        export_root = export_dir.resolve()
 
         for line in index_lines:
-            filename = _extract_export_filename(line)
-            if filename not in changed:
+            filename_raw = _extract_export_filename(line)
+            if filename_raw not in changed:
                 continue
-            if "ExportRecipes" in filename or "ExportFusionBundles" in filename:
+            if "ExportRecipes" in filename_raw or "ExportFusionBundles" in filename_raw:
                 continue
 
-            out_path = export_dir / filename
+            filename = _sanitize_export_filename(filename_raw)
+            if not filename:
+                logger.warning("skip suspicious public export filename: %s", filename_raw)
+                continue
+
+            out_path = (export_dir / filename).resolve()
+            try:
+                out_path.relative_to(export_root)
+            except ValueError:
+                logger.warning("skip public export path traversal: %s", filename_raw)
+                continue
+
             manifest_url = PUBLIC_EXPORT_MANIFEST_URL % line
             manifest_resp = await self._http.download_to(manifest_url, str(out_path))
             if 200 <= manifest_resp.status < 300:

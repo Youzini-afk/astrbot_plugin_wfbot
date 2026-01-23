@@ -18,6 +18,9 @@ class WarframeConfig:
     # Retry policy
     retries: int = 2
     retry_backoff_seconds: float = 2.0
+    http_max_request_time_seconds: float | None = 30.0
+    http_no_proxy_enabled: bool = True
+    http_no_proxy_suffixes: tuple[str, ...] = ("warframe.com",)
 
     # Data refresh intervals (seconds). Set to 0 to disable background refresh for that job.
     worldstate_refresh_interval: float = 600.0  # NyxBot: every 10 min
