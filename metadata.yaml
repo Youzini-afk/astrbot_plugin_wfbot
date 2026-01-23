@@ -1,5 +1,5 @@
 name: "astrbot_plugin_wfbot"
 version: "0.1.0"
 author: "astr_wfbot"
-desc: "Warframe data layer (worldstate/public export/mirrors/market) with cache, cleanup, scheduler"
+desc: "Warframe 数据层（世界状态/PublicExport/多镜像/market），支持缓存、清理与定时刷新"
 url: "https://example.com"

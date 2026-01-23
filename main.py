@@ -41,7 +41,7 @@ PLUGIN_ID = "astrbot_plugin_wfbot"
 logger = logging.getLogger(__name__)
 
 
-@register("astrbot_plugin_wfbot", "astr_wfbot", "Warframe datasource manager", "0.1.0")
+@register("astrbot_plugin_wfbot", "astr_wfbot", "Warframe 数据层（世界状态/PublicExport/多镜像/market），支持缓存、清理与定时刷新", "0.1.0")
 class WarframeDatasourcePlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
