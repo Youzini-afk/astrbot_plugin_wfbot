@@ -20,6 +20,7 @@ class SubscriptionEntry:
     unified_msg_origin: str
     user_id: str | None
     platform: str | None
+    group_id: str | None
     topics: dict[str, dict[str, Any]]
 
 
@@ -95,6 +96,7 @@ class SubscriptionStore:
             umo = it.get("umo")
             uid = it.get("uid")
             platform = it.get("platform")
+            group_id = it.get("group_id")
             topics = it.get("topics")
             if not isinstance(umo, str) or not umo:
                 continue
@@ -102,9 +104,11 @@ class SubscriptionStore:
                 uid = None
             if platform is not None and not isinstance(platform, str):
                 platform = None
+            if group_id is not None and not isinstance(group_id, str):
+                group_id = None
             if not isinstance(topics, dict):
                 topics = {}
-            out.append(SubscriptionEntry(unified_msg_origin=umo, user_id=uid, platform=platform, topics=topics))
+            out.append(SubscriptionEntry(unified_msg_origin=umo, user_id=uid, platform=platform, group_id=group_id, topics=topics))
         return out
 
     def upsert_topic(
@@ -116,6 +120,7 @@ class SubscriptionStore:
         topic: str,
         user_name: str | None = None,
         platform: str | None = None,
+        group_id: str | None = None,
     ) -> bool:
         items = data.setdefault("items", [])
         if not isinstance(items, list):
@@ -132,6 +137,7 @@ class SubscriptionStore:
                 "umo": umo,
                 "uid": uid,
                 "platform": platform,
+                "group_id": group_id,
                 "user_name": user_name,
                 "topics": {},
                 "created_at": _utcnow_iso(),
@@ -151,6 +157,8 @@ class SubscriptionStore:
             entry["user_name"] = user_name
         if platform:
             entry["platform"] = platform
+        if group_id:
+            entry["group_id"] = group_id
         entry["updated_at"] = _utcnow_iso()
         return True
 

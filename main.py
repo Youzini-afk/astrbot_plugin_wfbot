@@ -136,7 +136,7 @@ class WarframeDatasourcePlugin(Star):
 
     if hasattr(afilter, "on_astrbot_loaded"):
         @afilter.on_astrbot_loaded()
-        async def _on_loaded(self, event):
+        async def _on_loaded(self, *args, **kwargs):
             self._maybe_start_background()
 
     def _resolve_plugin_data_dir(self) -> Path:
@@ -192,12 +192,6 @@ class WarframeDatasourcePlugin(Star):
         except Exception:
             return None
 
-    def _cq_at_code(self, user_id: str) -> str | None:
-        s = str(user_id)
-        if not s.isdigit():
-            return None
-        return f"[CQ:at,qq={s}]"
-
     async def _push_with_mention(
         self,
         unified_msg_origin: str,
@@ -209,16 +203,6 @@ class WarframeDatasourcePlugin(Star):
     ) -> bool:
         base = list(comps)
         if user_id:
-            if platform == "aiocqhttp":
-                cq = self._cq_at_code(user_id)
-                if cq is not None:
-                    with_at = [Comp.Plain(cq)] + base
-                    try:
-                        await self.context.send_message(unified_msg_origin, with_at)
-                        return True
-                    except Exception:
-                        pass
-
             at = self._try_build_at(user_id)
             if at is not None:
                 with_at = [at] + base
@@ -239,10 +223,6 @@ class WarframeDatasourcePlugin(Star):
             try:
                 from astrbot.api.event import MessageChain
 
-                if user_id and platform == "aiocqhttp":
-                    cq = self._cq_at_code(user_id)
-                    if cq:
-                        text = f"{cq} {text}"
                 await self.context.send_message(unified_msg_origin, MessageChain().message(text))
                 return True
             except Exception:
@@ -263,7 +243,20 @@ class WarframeDatasourcePlugin(Star):
         except Exception:
             return await self._push_plain_text(unified_msg_origin, text)
 
-    async def _push_to_subscriber(self, unified_msg_origin: str, *, platform: str | None, user_id: str | None, title: str, text: str) -> bool:
+    async def _push_to_subscriber(
+        self,
+        unified_msg_origin: str,
+        *,
+        platform: str | None,
+        user_id: str | None,
+        group_id: str | None,
+        title: str,
+        text: str,
+    ) -> bool:
+        if platform == "aiocqhttp" and user_id and group_id:
+            ok = await self._send_aiocqhttp_at_message(group_id=group_id, user_id=user_id, text=text)
+            if ok:
+                return True
         if not self.img_cfg.enabled:
             return await self._push_with_mention(
                 unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Plain(text)], fallback_text=text
@@ -281,6 +274,25 @@ class WarframeDatasourcePlugin(Star):
             comps=[Comp.Image.fromFileSystem(str(path))],
             fallback_text=text,
         )
+
+    async def _send_aiocqhttp_at_message(self, *, group_id: str, user_id: str, text: str) -> bool:
+        try:
+            platform = self.context.get_platform(afilter.PlatformAdapterType.AIOCQHTTP)
+            if platform is None:
+                return False
+            client_getter = getattr(platform, "get_client", None)
+            if not callable(client_getter):
+                return False
+            client = client_getter()
+            message = [
+                {"type": "at", "data": {"qq": str(user_id)}},
+                {"type": "text", "data": {"text": " " + text}},
+            ]
+            await client.api.call_action("send_group_msg", group_id=int(group_id), message=message)
+            return True
+        except Exception:
+            logger.debug("aiocqhttp at-send failed", exc_info=True)
+            return False
 
     async def _start_background(self) -> None:
         await self.mgr.refresh_all_once()
@@ -1069,13 +1081,14 @@ class WarframeDatasourcePlugin(Star):
         if not isinstance(items, list) or not items:
             return
 
-        to_send: list[tuple[str, str | None, str | None, str, str, str]] = []
+        to_send: list[tuple[str, str | None, str | None, str | None, str, str, str]] = []
         for it in items:
             if not isinstance(it, dict):
                 continue
             umo = it.get("umo")
             uid = it.get("uid")
             platform = it.get("platform")
+            group_id = it.get("group_id")
             topics = it.get("topics")
             if not isinstance(umo, str) or not umo or not isinstance(topics, dict):
                 continue
@@ -1083,6 +1096,8 @@ class WarframeDatasourcePlugin(Star):
                 uid = None
             if platform is not None and not isinstance(platform, str):
                 platform = None
+            if group_id is not None and not isinstance(group_id, str):
+                group_id = None
             for t, meta in topics.items():
                 if not isinstance(t, str) or not isinstance(meta, dict):
                     continue
@@ -1092,14 +1107,14 @@ class WarframeDatasourcePlugin(Star):
                 title, text, pre_sig = pr
                 if meta.get("last_pre_sig") == pre_sig:
                     continue
-                to_send.append((umo, platform, uid, t, title, text))
+                to_send.append((umo, platform, uid, group_id, t, title, text))
 
         if not to_send:
             return
 
         sent: list[tuple[str, str | None, str, str]] = []
-        for umo, platform, uid, topic, title, text in to_send:
-            ok = await self._push_to_subscriber(umo, platform=platform, user_id=uid, title=title, text=text)
+        for umo, platform, uid, group_id, topic, title, text in to_send:
+            ok = await self._push_to_subscriber(umo, platform=platform, user_id=uid, group_id=group_id, title=title, text=text)
             if ok:
                 sent.append((umo, uid, topic, hashlib.sha256(text.encode("utf-8")).hexdigest()))
 
@@ -1337,13 +1352,14 @@ class WarframeDatasourcePlugin(Star):
             sig = self._topic_sig(t, ws2)
             topic_payload[t] = (title, text, sig)
 
-        to_send: list[tuple[str, str | None, str | None, str, str, str, str | None]] = []
+        to_send: list[tuple[str, str | None, str | None, str | None, str, str, str, str | None]] = []
         for it in items:
             if not isinstance(it, dict):
                 continue
             umo = it.get("umo")
             uid = it.get("uid")
             platform = it.get("platform")
+            group_id = it.get("group_id")
             topics = it.get("topics")
             if not isinstance(umo, str) or not umo or not isinstance(topics, dict):
                 continue
@@ -1351,6 +1367,8 @@ class WarframeDatasourcePlugin(Star):
                 uid = None
             if platform is not None and not isinstance(platform, str):
                 platform = None
+            if group_id is not None and not isinstance(group_id, str):
+                group_id = None
             for t, meta in topics.items():
                 if not isinstance(t, str) or t not in topic_payload or not isinstance(meta, dict):
                     continue
@@ -1359,14 +1377,14 @@ class WarframeDatasourcePlugin(Star):
                 last_sig = meta.get("last_sig")
                 title, text, sig = topic_payload[t]
                 if last_sig != sig:
-                    to_send.append((umo, platform, uid, t, title, text, sig))
+                    to_send.append((umo, platform, uid, group_id, t, title, text, sig))
 
         if not to_send:
             return
 
         sent: list[tuple[str, str | None, str, str]] = []
-        for umo, platform, uid, topic, title, text, sig in to_send:
-            ok = await self._push_to_subscriber(umo, platform=platform, user_id=uid, title=title, text=text)
+        for umo, platform, uid, group_id, topic, title, text, sig in to_send:
+            ok = await self._push_to_subscriber(umo, platform=platform, user_id=uid, group_id=group_id, title=title, text=text)
             if ok:
                 sent.append((umo, uid, topic, sig))
 
@@ -1689,12 +1707,21 @@ class WarframeDatasourcePlugin(Star):
         uid = str(event.get_sender_id())
         uname = event.get_sender_name()
         platform_name = None
+        group_id = None
         get_platform_name = getattr(event, "get_platform_name", None)
         if callable(get_platform_name):
             try:
                 platform_name = str(get_platform_name())
             except Exception:
                 platform_name = None
+        get_group_id = getattr(event, "get_group_id", None)
+        if callable(get_group_id):
+            try:
+                gid = get_group_id()
+                if gid is not None:
+                    group_id = str(gid)
+            except Exception:
+                group_id = None
 
         if not topic.strip():
             async with self._sub_lock:
@@ -1717,7 +1744,7 @@ class WarframeDatasourcePlugin(Star):
                 "- /wf 订阅 夜灵平原 夜晚 10  (提前10分钟预提醒)",
                 "取消订阅：",
                 "- /wf 取消订阅 <项目>  (同样支持过滤，如：/wf 取消订阅 裂缝 钢铁 防御)",
-                "- /wf 取消订阅 全部",
+                "- /wf 取消订阅 全部（仅清除本人订阅）",
                 "查看列表：/wf 订阅列表",
                 f"当前用户订阅：{', '.join([self._topic_label(t) for t in cur_topics]) or '-'}",
             ]
@@ -1743,7 +1770,9 @@ class WarframeDatasourcePlugin(Star):
 
         async with self._sub_lock:
             data = await self._sub_store.load()
-            added = self._sub_store.upsert_topic(data, umo=umo, uid=uid, topic=t, user_name=uname, platform=platform_name)
+            added = self._sub_store.upsert_topic(
+                data, umo=umo, uid=uid, topic=t, user_name=uname, platform=platform_name, group_id=group_id
+            )
             if sig is not None:
                 self._sub_store.set_last_sig(data, umo=umo, uid=uid, topic=t, sig=sig)
             await self._sub_store.save(data)
@@ -1768,10 +1797,10 @@ class WarframeDatasourcePlugin(Star):
         if not s or s in {"全部", "all", "All"}:
             async with self._sub_lock:
                 data = await self._sub_store.load()
-                changed = self._sub_store.clear_umo(data, umo=umo, uid=uid, include_legacy=True)
+                changed = self._sub_store.clear_umo(data, umo=umo, uid=uid, include_legacy=False)
                 if changed:
                     await self._sub_store.save(data)
-            yield event.plain_result("已取消本会话全部订阅" if changed else "本会话暂无订阅")
+            yield event.plain_result("已取消当前用户全部订阅" if changed else "当前用户暂无订阅")
             return
 
         t = self._normalize_sub_topic_args(s, filter1, filter2, filter3)
@@ -1812,19 +1841,30 @@ class WarframeDatasourcePlugin(Star):
         uid = str(event.get_sender_id())
 
         platform_name = None
+        group_id = None
         get_platform_name = getattr(event, "get_platform_name", None)
         if callable(get_platform_name):
             try:
                 platform_name = str(get_platform_name())
             except Exception:
                 platform_name = None
+        get_group_id = getattr(event, "get_group_id", None)
+        if callable(get_group_id):
+            try:
+                gid = get_group_id()
+                if gid is not None:
+                    group_id = str(gid)
+            except Exception:
+                group_id = None
 
         async def send_topic(t: str) -> tuple[bool, str | None]:
             ws = await self._ensure_worldstate()
             if ws is None:
                 return False, "worldstate unavailable, use /wf 更新"
             title, text = await self._topic_text(t, ws)
-            ok = await self._push_to_subscriber(umo, platform=platform_name, user_id=uid, title=title, text=text)
+            ok = await self._push_to_subscriber(
+                umo, platform=platform_name, user_id=uid, group_id=group_id, title=title, text=text
+            )
             return ok, None
 
         if not topic.strip():
@@ -1844,6 +1884,8 @@ class WarframeDatasourcePlugin(Star):
                 yield event.plain_result(f"已触发订阅测试：{self._topic_label(first_topic)}")
             else:
                 yield event.plain_result("订阅测试发送失败（请查看控制台日志）")
+            if platform_name == "aiocqhttp" and not group_id:
+                yield event.plain_result("当前为私聊或未记录群号，@ 不会生效；请在群内重新订阅以记录群号")
             return
 
         if topic.strip() in {"全部", "all", "All"}:
@@ -1863,6 +1905,8 @@ class WarframeDatasourcePlugin(Star):
                     return
                 ok_any = ok_any or ok
             yield event.plain_result("已触发订阅测试（全部）" if ok_any else "订阅测试发送失败（请查看控制台日志）")
+            if platform_name == "aiocqhttp" and not group_id:
+                yield event.plain_result("当前为私聊或未记录群号，@ 不会生效；请在群内重新订阅以记录群号")
             return
 
         t = self._normalize_sub_topic_args(topic, filter1, filter2, filter3)
@@ -1877,3 +1921,5 @@ class WarframeDatasourcePlugin(Star):
             yield event.plain_result(f"已触发订阅测试：{self._topic_label(t)}")
         else:
             yield event.plain_result("订阅测试发送失败（请查看控制台日志）")
+        if platform_name == "aiocqhttp" and not group_id:
+            yield event.plain_result("当前为私聊或未记录群号，@ 不会生效；请在群内重新订阅以记录群号")
