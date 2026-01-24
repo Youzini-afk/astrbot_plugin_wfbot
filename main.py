@@ -68,6 +68,10 @@ class WarframeDatasourcePlugin(Star):
         if not isinstance(http_cfg, dict):
             http_cfg = {}
 
+        admin_cfg = self.config.get("admin", {})
+        if not isinstance(admin_cfg, dict):
+            admin_cfg = {}
+
         i18n_cfg = self.config.get("i18n", {})
         if not isinstance(i18n_cfg, dict):
             i18n_cfg = {}
@@ -121,12 +125,15 @@ class WarframeDatasourcePlugin(Star):
 
         self._cycles_default_offset_seconds = int(subs_cfg.get("cycles_default_offset_minutes", 0)) * 60
         self._simplify_zh = bool(i18n_cfg.get("simplify_zh", True))
+        self._group_admins = admin_cfg.get("group_admins", {}) if isinstance(admin_cfg.get("group_admins", {}), dict) else {}
+        self._session_admins = admin_cfg.get("session_admins", {}) if isinstance(admin_cfg.get("session_admins", {}), dict) else {}
 
         self._sub_lock = asyncio.Lock()
         self._sub_store = SubscriptionStore(data_dir / "subscriptions.json")
         self.mgr.events.on("worldstate.updated", self._on_worldstate_updated)
         self._sub_tick_task: asyncio.Task | None = None
         self._cycle_mem: dict[str, dict[str, float | str]] = {}
+        self._push_enabled: bool = True
 
         self._task: asyncio.Task | None = None
         try:
@@ -137,6 +144,13 @@ class WarframeDatasourcePlugin(Star):
     if hasattr(afilter, "on_astrbot_loaded"):
         @afilter.on_astrbot_loaded()
         async def _on_loaded(self, *args, **kwargs):
+            getter = getattr(self, "get_kv_data", None)
+            if callable(getter):
+                try:
+                    val = await getter("wf_push_enabled", True)
+                    self._push_enabled = bool(val)
+                except Exception:
+                    logger.debug("load kv wf_push_enabled failed", exc_info=True)
             self._maybe_start_background()
 
     def _resolve_plugin_data_dir(self) -> Path:
@@ -253,6 +267,8 @@ class WarframeDatasourcePlugin(Star):
         title: str,
         text: str,
     ) -> bool:
+        if not self._push_enabled:
+            return False
         if platform == "aiocqhttp" and user_id and group_id:
             ok = await self._send_aiocqhttp_at_message(group_id=group_id, user_id=user_id, text=text)
             if ok:
@@ -293,6 +309,82 @@ class WarframeDatasourcePlugin(Star):
         except Exception:
             logger.debug("aiocqhttp at-send failed", exc_info=True)
             return False
+
+    def _normalize_admin_list(self, value) -> set[str]:
+        if value is None:
+            return set()
+        if isinstance(value, list):
+            return {str(v) for v in value if str(v).strip()}
+        if isinstance(value, (str, int)):
+            s = str(value).strip()
+            return {s} if s else set()
+        return set()
+
+    def _is_custom_admin(self, event: AstrMessageEvent) -> bool:
+        uid = str(event.get_sender_id())
+        group_id = None
+        get_group_id = getattr(event, "get_group_id", None)
+        if callable(get_group_id):
+            try:
+                gid = get_group_id()
+                if gid is not None:
+                    group_id = str(gid)
+            except Exception:
+                group_id = None
+
+        if group_id and isinstance(self._group_admins, dict):
+            admins = self._normalize_admin_list(self._group_admins.get(group_id))
+            if uid in admins:
+                return True
+
+        umo = getattr(event, "unified_msg_origin", None)
+        if isinstance(umo, str) and isinstance(self._session_admins, dict):
+            admins = self._normalize_admin_list(self._session_admins.get(umo))
+            if uid in admins:
+                return True
+        return False
+
+    def _is_astrbot_admin(self, event: AstrMessageEvent) -> bool:
+        checker = getattr(event, "check_permission", None)
+        if callable(checker):
+            try:
+                return bool(checker(afilter.PermissionType.ADMIN))
+            except Exception:
+                pass
+        is_admin = getattr(event, "is_admin", None)
+        if callable(is_admin):
+            try:
+                return bool(is_admin())
+            except Exception:
+                pass
+        perm_mgr = getattr(self.context, "permission_manager", None)
+        if perm_mgr is not None:
+            is_admin2 = getattr(perm_mgr, "is_admin", None)
+            if callable(is_admin2):
+                try:
+                    return bool(is_admin2(event.get_sender_id()))
+                except Exception:
+                    pass
+        return False
+
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        return self._is_astrbot_admin(event) or self._is_custom_admin(event)
+
+    async def _clear_image_cache(self) -> int:
+        def _clear_sync(folder: Path) -> int:
+            if not folder.exists():
+                return -1
+            files = [p for p in folder.glob("*.png") if p.is_file()]
+            removed = 0
+            for p in files:
+                try:
+                    p.unlink()
+                    removed += 1
+                except FileNotFoundError:
+                    pass
+            return removed
+
+        return await asyncio.to_thread(_clear_sync, self.img_dir)
 
     async def _start_background(self) -> None:
         await self.mgr.refresh_all_once()
@@ -1436,22 +1528,8 @@ class WarframeDatasourcePlugin(Star):
 
     @wf_group.command("清理图片缓存", alias={"清图", "清理图片", "清理缓存图片", "clear_images", "clear_image_cache"})
     async def wf_clear_images(self, event: AstrMessageEvent):
-        def _clear_sync(folder: Path) -> int:
-            if not folder.exists():
-                return -1
-            files = [p for p in folder.glob("*.png") if p.is_file()]
-            removed = 0
-            for p in files:
-                try:
-                    p.unlink()
-                    removed += 1
-                except FileNotFoundError:
-                    pass
-            return removed
-
         try:
-            folder = self.img_dir
-            removed = await asyncio.to_thread(_clear_sync, folder)
+            removed = await self._clear_image_cache()
             if removed < 0:
                 yield event.plain_result("图片缓存目录不存在（无需清理）")
                 return
@@ -1488,6 +1566,9 @@ class WarframeDatasourcePlugin(Star):
             "- /wf 订阅列表 (list)\n"
             "- /wf 订阅测试 <项目|全部> (test)\n"
             "- /wf 清理图片缓存 (clear image cache)\n"
+            "- /wf 管理 推送 开|关|状态\n"
+            "- /wf 管理 清理图片缓存\n"
+            "- /wf 管理 删除订阅 全部|本群|<QQ>\n"
             f"image_mode={self.img_cfg.enabled} cache_images={self.img_cfg.cache_images}"
         )
         async for r in self._send_text_or_image(event, title="/wf 帮助", text=msg):
@@ -1923,3 +2004,82 @@ class WarframeDatasourcePlugin(Star):
             yield event.plain_result("订阅测试发送失败（请查看控制台日志）")
         if platform_name == "aiocqhttp" and not group_id:
             yield event.plain_result("当前为私聊或未记录群号，@ 不会生效；请在群内重新订阅以记录群号")
+
+    @wf_group.command("管理", alias={"admin", "管理员"})
+    async def wf_admin(self, event: AstrMessageEvent, action: str = "", arg1: str = "", arg2: str = ""):
+        if not self._is_admin(event):
+            yield event.plain_result("仅管理员可用")
+            return
+        a0 = (action or "").strip()
+        a1 = (arg1 or "").strip()
+        a2 = (arg2 or "").strip()
+
+        if a0 in {"推送", "push"}:
+            if a1 in {"开", "开启", "on", "enable", "启用"}:
+                self._push_enabled = True
+                setter = getattr(self, "put_kv_data", None)
+                if callable(setter):
+                    try:
+                        await setter("wf_push_enabled", True)
+                    except Exception:
+                        logger.debug("save kv wf_push_enabled failed", exc_info=True)
+                yield event.plain_result("已开启全部推送")
+                return
+            if a1 in {"关", "关闭", "off", "disable", "停用"}:
+                self._push_enabled = False
+                setter = getattr(self, "put_kv_data", None)
+                if callable(setter):
+                    try:
+                        await setter("wf_push_enabled", False)
+                    except Exception:
+                        logger.debug("save kv wf_push_enabled failed", exc_info=True)
+                yield event.plain_result("已关闭全部推送")
+                return
+            if a1 in {"状态", "status", ""}:
+                yield event.plain_result(f"推送状态：{'开启' if self._push_enabled else '关闭'}")
+                return
+            yield event.plain_result("用法：/wf 管理 推送 开|关|状态")
+            return
+
+        if a0 in {"清理图片缓存", "清理缓存", "清图", "clear_images"}:
+            removed = await self._clear_image_cache()
+            if removed < 0:
+                yield event.plain_result("图片缓存目录不存在（无需清理）")
+                return
+            if removed == 0:
+                yield event.plain_result("图片缓存为空（无需清理）")
+                return
+            yield event.plain_result(f"已清理图片缓存：{removed} 张")
+            return
+
+        if a0 in {"删除订阅", "清除订阅", "清订阅", "移除订阅"}:
+            scope = a1 or "全部"
+            async with self._sub_lock:
+                data = await self._sub_store.load()
+                items = data.get("items")
+                if not isinstance(items, list):
+                    items = []
+                before = len(items)
+                if scope in {"全部", "all", "All"}:
+                    data["items"] = []
+                elif scope in {"本群", "本会话", "当前会话", "会话"}:
+                    umo = event.unified_msg_origin
+                    data["items"] = [it for it in items if not (isinstance(it, dict) and it.get("umo") == umo)]
+                elif scope.isdigit():
+                    data["items"] = [it for it in items if not (isinstance(it, dict) and str(it.get("uid") or "") == scope)]
+                else:
+                    yield event.plain_result("用法：/wf 管理 删除订阅 全部|本群|<QQ>")
+                    return
+                after = len(data["items"])
+                if after != before:
+                    await self._sub_store.save(data)
+                removed = before - after
+            yield event.plain_result(f"已删除订阅：{removed} 条")
+            return
+
+        yield event.plain_result(
+            "管理员命令：\n"
+            "- /wf 管理 推送 开|关|状态\n"
+            "- /wf 管理 清理图片缓存\n"
+            "- /wf 管理 删除订阅 全部|本群|<QQ>"
+        )

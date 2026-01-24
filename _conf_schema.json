@@ -169,6 +169,22 @@
       }
     }
   },
+  "admin": {
+    "type": "object",
+    "description": "管理员扩展（保留 AstrBot 管理员判定）",
+    "items": {
+      "group_admins": {
+        "type": "dict",
+        "description": "按群配置管理员",
+        "hint": "键=群号，值=QQ号列表（字符串或数组）。示例：{\"123456\": [\"111\", \"222\"]}"
+      },
+      "session_admins": {
+        "type": "dict",
+        "description": "按会话配置管理员（高级）",
+        "hint": "键=unified_msg_origin，值=用户ID列表。仅在你了解 unified_msg_origin 时使用。"
+      }
+    }
+  },
   "i18n": {
     "type": "object",
     "description": "语言与显示",

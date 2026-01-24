@@ -49,6 +49,12 @@
     - 福尔图娜：`温暖` / `寒冷`（示例：`/wf 订阅 福尔图娜 寒冷`）
     - 预提醒：在状态切换前 N 分钟提醒（示例：`/wf 订阅 夜灵平原 夜晚 10` 或 `/wf 订阅 平原 夜晚 提前10`）
 
+- 管理员命令
+  - `/wf 管理 推送 开|关|状态`：全局开启/关闭推送
+  - `/wf 管理 清理图片缓存`
+  - `/wf 管理 删除订阅 全部|本群|<QQ>`：清空所有/当前会话/指定用户订阅
+  - AstrBot 管理员依旧有效；可在 WebUI 为每个群配置额外管理员（见“配置”）
+
 ## 安装
 - 直接在astrbot的插件市场搜索astrbot_plugin_wfbot，点击安装即可
 - 或者：
@@ -76,6 +82,8 @@
 - `render.*`：图片模式与图片缓存（支持自定义宽度/字号/字体路径/emoji 处理方式）
 - `subscriptions.cycles_default_offset_minutes`：平原/循环订阅默认提前/后置分钟数（>0 提前，<0 后置）
 - `i18n.simplify_zh`：将繁体中文转换为简体（默认开启，主要用于 solNodes 等第三方数据源）
+- `admin.group_admins`：按群配置管理员（键=群号，值=QQ号列表）
+- `admin.session_admins`：按会话配置管理员（高级，需 unified_msg_origin）
 
 ## 存储规范（对齐 AstrBot 官方）
 
