@@ -25,6 +25,7 @@
   - `/wf 订阅 <项目>`（别名：`subscribe`、`关注`）
   - `/wf 取消订阅 <项目|全部>`（别名：`unsubscribe`、`退订`）
   - `/wf 订阅列表`（别名：`subs`、`list`）
+  - `/wf 订阅测试 <项目|全部>`（别名：`测试订阅`、`推送测试`）
   - `/wf 清理图片缓存`（别名：`清图`、`clear_image_cache`）
 
 - 图片模式（可选）
@@ -52,24 +53,6 @@
 1. 将整个插件文件夹放到：`AstrBot/data/plugins/astrbot_plugin_wfbot/`
 2. 在 AstrBot 的 WebUI → 插件管理 → 重载插件
 3. AstrBot 会根据本插件的 `requirements.txt` 自动安装依赖（包含 `aiohttp` 和 `Pillow`）
-
-## 更新与推送（GitHub）
-
-如果你已经创建并上传过仓库，后续更新通常是下面这套流程（PowerShell）：
-
-```powershell
-cd E:\cursor_project\astrbot_plugin_wfbot
-git status
-git add .
-git commit -m "feat: xxx"   # 自己改成合适的说明
-git push origin main
-```
-
-如果你执行了 `git push` 但 GitHub 没变化，常见原因：
-
-- 你没有产生新的提交（`git status` 为空 / `git push` 提示 `Everything up-to-date`）
-- 你提交在别的分支（`git branch` 看看当前分支是不是 `main`）
-- remote 不对（`git remote -v` 确认 `origin` 指向你的仓库）
 
 ## 如何验证订阅会 @ 你
 

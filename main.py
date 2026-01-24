@@ -134,6 +134,11 @@ class WarframeDatasourcePlugin(Star):
         except RuntimeError:
             self._task = None
 
+    if hasattr(afilter, "on_astrbot_loaded"):
+        @afilter.on_astrbot_loaded()
+        async def _on_loaded(self, event):
+            self._maybe_start_background()
+
     def _resolve_plugin_data_dir(self) -> Path:
         # Prefer AstrBot standard tools (review requirement).
         try:
@@ -193,7 +198,15 @@ class WarframeDatasourcePlugin(Star):
             return None
         return f"[CQ:at,qq={s}]"
 
-    async def _push_with_mention(self, unified_msg_origin: str, *, platform: str | None, user_id: str | None, comps: list) -> bool:
+    async def _push_with_mention(
+        self,
+        unified_msg_origin: str,
+        *,
+        platform: str | None,
+        user_id: str | None,
+        comps: list,
+        fallback_text: str | None = None,
+    ) -> bool:
         base = list(comps)
         if user_id:
             if platform == "aiocqhttp":
@@ -219,7 +232,22 @@ class WarframeDatasourcePlugin(Star):
             await self.context.send_message(unified_msg_origin, base)
             return True
         except Exception:
-            return False
+            pass
+
+        if fallback_text:
+            text = fallback_text
+            try:
+                from astrbot.api.event import MessageChain
+
+                if user_id and platform == "aiocqhttp":
+                    cq = self._cq_at_code(user_id)
+                    if cq:
+                        text = f"{cq} {text}"
+                await self.context.send_message(unified_msg_origin, MessageChain().message(text))
+                return True
+            except Exception:
+                logger.debug("send_message fallback failed", exc_info=True)
+        return False
 
     async def _push_text_or_image(self, unified_msg_origin: str, *, title: str, text: str) -> bool:
         if not self.img_cfg.enabled:
@@ -237,12 +265,22 @@ class WarframeDatasourcePlugin(Star):
 
     async def _push_to_subscriber(self, unified_msg_origin: str, *, platform: str | None, user_id: str | None, title: str, text: str) -> bool:
         if not self.img_cfg.enabled:
-            return await self._push_with_mention(unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Plain(text)])
+            return await self._push_with_mention(
+                unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Plain(text)], fallback_text=text
+            )
 
         path = await get_or_render_png(text=text, title=title, out_dir=self.img_dir, cfg=self.img_cfg, key_prefix="wf")
         if path is None:
-            return await self._push_with_mention(unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Plain(text)])
-        return await self._push_with_mention(unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Image.fromFileSystem(str(path))])
+            return await self._push_with_mention(
+                unified_msg_origin, platform=platform, user_id=user_id, comps=[Comp.Plain(text)], fallback_text=text
+            )
+        return await self._push_with_mention(
+            unified_msg_origin,
+            platform=platform,
+            user_id=user_id,
+            comps=[Comp.Image.fromFileSystem(str(path))],
+            fallback_text=text,
+        )
 
     async def _start_background(self) -> None:
         await self.mgr.refresh_all_once()
@@ -1430,6 +1468,7 @@ class WarframeDatasourcePlugin(Star):
             "- /wf 订阅 <项目> (subscribe)\n"
             "- /wf 取消订阅 <项目|全部> (unsubscribe)\n"
             "- /wf 订阅列表 (list)\n"
+            "- /wf 订阅测试 <项目|全部> (test)\n"
             "- /wf 清理图片缓存 (clear image cache)\n"
             f"image_mode={self.img_cfg.enabled} cache_images={self.img_cfg.cache_images}"
         )
@@ -1765,3 +1804,76 @@ class WarframeDatasourcePlugin(Star):
         msg = "\n".join(lines)
         async for r in self._send_text_or_image(event, title="订阅列表", text=msg):
             yield r
+
+    @wf_group.command("订阅测试", alias={"测试订阅", "推送测试", "test_sub", "sub_test"})
+    async def wf_subscribe_test(self, event: AstrMessageEvent, topic: str = "", filter1: str = "", filter2: str = "", filter3: str = ""):
+        self._maybe_start_background()
+        umo = event.unified_msg_origin
+        uid = str(event.get_sender_id())
+
+        platform_name = None
+        get_platform_name = getattr(event, "get_platform_name", None)
+        if callable(get_platform_name):
+            try:
+                platform_name = str(get_platform_name())
+            except Exception:
+                platform_name = None
+
+        async def send_topic(t: str) -> tuple[bool, str | None]:
+            ws = await self._ensure_worldstate()
+            if ws is None:
+                return False, "worldstate unavailable, use /wf 更新"
+            title, text = await self._topic_text(t, ws)
+            ok = await self._push_to_subscriber(umo, platform=platform_name, user_id=uid, title=title, text=text)
+            return ok, None
+
+        if not topic.strip():
+            async with self._sub_lock:
+                data = await self._sub_store.load()
+                entries = self._sub_store.list_entries(data)
+            bound = next((e for e in entries if e.unified_msg_origin == umo and e.user_id == uid), None)
+            if not bound or not bound.topics:
+                yield event.plain_result("你还没有订阅项目，请先使用 /wf 订阅 <项目>")
+                return
+            first_topic = next(iter(bound.topics.keys()))
+            ok, err = await send_topic(first_topic)
+            if err:
+                yield event.plain_result(err)
+                return
+            if ok:
+                yield event.plain_result(f"已触发订阅测试：{self._topic_label(first_topic)}")
+            else:
+                yield event.plain_result("订阅测试发送失败（请查看控制台日志）")
+            return
+
+        if topic.strip() in {"全部", "all", "All"}:
+            async with self._sub_lock:
+                data = await self._sub_store.load()
+                entries = self._sub_store.list_entries(data)
+            bound = next((e for e in entries if e.unified_msg_origin == umo and e.user_id == uid), None)
+            topics = sorted(list(bound.topics.keys())) if bound else []
+            if not topics:
+                yield event.plain_result("你还没有订阅项目，请先使用 /wf 订阅 <项目>")
+                return
+            ok_any = False
+            for t in topics:
+                ok, err = await send_topic(t)
+                if err:
+                    yield event.plain_result(err)
+                    return
+                ok_any = ok_any or ok
+            yield event.plain_result("已触发订阅测试（全部）" if ok_any else "订阅测试发送失败（请查看控制台日志）")
+            return
+
+        t = self._normalize_sub_topic_args(topic, filter1, filter2, filter3)
+        if t is None:
+            yield event.plain_result("未知订阅项，先用 /wf 订阅 查看可选项目")
+            return
+        ok, err = await send_topic(t)
+        if err:
+            yield event.plain_result(err)
+            return
+        if ok:
+            yield event.plain_result(f"已触发订阅测试：{self._topic_label(t)}")
+        else:
+            yield event.plain_result("订阅测试发送失败（请查看控制台日志）")
