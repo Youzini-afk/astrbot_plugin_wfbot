@@ -26,6 +26,19 @@ MISSION_TYPE_ZH: dict[str, str] = {
     "MT_VOID_ARMAGEDDON": "虚空末日",
 }
 
+FACTION_ZH: dict[str, str] = {
+    "FC_GRINEER": "Grineer",
+    "FC_CORPUS": "Corpus",
+    "FC_INFESTED": "Infested",
+    "FC_OROKIN": "Orokin",
+    "FC_SENTIENT": "Sentient",
+    "GRINEER": "Grineer",
+    "CORPUS": "Corpus",
+    "INFESTED": "Infested",
+    "OROKIN": "Orokin",
+    "SENTIENT": "Sentient",
+}
+
 FISSURE_TIER_ZH: dict[str, str] = {
     "VoidT1": "古纪",
     "VoidT2": "中纪",
@@ -138,6 +151,80 @@ def mission_emoji(code: Any) -> str:
     }.get(code, "")
 
 
+def _translate_mission_like(val: Any) -> str:
+    if not isinstance(val, str) or not val:
+        return "-"
+    if val in MISSION_TYPE_ZH or val.startswith("MT_"):
+        return translate_mission_type(val)
+    lookup = val.strip()
+    key = lookup.lower().replace("_", " ").strip()
+    mapping = {
+        "extermination": "歼灭",
+        "capture": "捕获",
+        "survival": "生存",
+        "defense": "防御",
+        "mobile defense": "移动防御",
+        "rescue": "救援",
+        "spy": "间谍",
+        "sabotage": "破坏",
+        "excavation": "挖掘",
+        "interception": "拦截",
+        "disruption": "扰乱",
+        "hive": "清巢",
+        "assassination": "刺杀",
+        "assault": "强袭",
+    }
+    if key in mapping:
+        return mapping[key]
+    return val
+
+
+def _translate_boss(val: Any) -> str:
+    if not isinstance(val, str) or not val:
+        return "-"
+    mapping = {
+        "SORTIE_BOSS_INFALAD": "异融者 Alad V",
+        "SORTIE_BOSS_AMAR": "阿玛尔",
+        "SORTIE_BOSS_BOREAL": "波瑞尔",
+        "SORTIE_BOSS_NIRA": "尼拉",
+    }
+    if val in mapping:
+        return mapping[val]
+    if val.startswith("SORTIE_BOSS_"):
+        core = val.replace("SORTIE_BOSS_", "").replace("_", " ").title()
+        return core
+    return val
+
+
+def _translate_faction(val: Any) -> str:
+    if not isinstance(val, str) or not val:
+        return "-"
+    return FACTION_ZH.get(val, val)
+
+
+def _is_active(activation: Any, expiry: Any) -> bool | None:
+    now = datetime.now(timezone.utc).timestamp()
+    act = None
+    exp = None
+    if isinstance(activation, (int, float)):
+        act = float(activation)
+    elif isinstance(activation, str) and activation:
+        try:
+            act = datetime.fromisoformat(activation.replace("Z", "+00:00")).replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            act = None
+    if isinstance(expiry, (int, float)):
+        exp = float(expiry)
+    elif isinstance(expiry, str) and expiry:
+        try:
+            exp = datetime.fromisoformat(expiry.replace("Z", "+00:00")).replace(tzinfo=timezone.utc).timestamp()
+        except Exception:
+            exp = None
+    if act is None or exp is None:
+        return None
+    return act <= now <= exp
+
+
 def _fmt_remaining(ts: Any) -> str:
     # Accept seconds timestamp (float/int) or ISO string; prefer short relative output.
     now = datetime.now(timezone.utc).timestamp()
@@ -244,14 +331,17 @@ def format_fissures(ws: dict, nodes_map: dict[str, str] | None = None, *, kind: 
 def format_invasions(ws: dict, nodes_map: dict[str, str] | None = None, limit: int = 8) -> str:
     inv = _g(ws, "invasions", default=[])
     if not isinstance(inv, list):
-        return "invasions: -"
+        return "⚔️ 入侵：-"
     active = [i for i in inv if isinstance(i, dict) and not i.get("completed")]
-    lines = [f"invasions(active): {len(active)}"]
+    lines = [f"⚔️ 入侵（{len(active)}）"]
     for i in active[:limit]:
         node = _node_name(str(i.get("node") or "-"), nodes_map)
+        atk = _translate_faction(i.get("attackingFaction") or i.get("attackerFaction") or i.get("faction"))
+        dfd = _translate_faction(i.get("defendingFaction") or i.get("defenderFaction"))
         prog = i.get("completion")
-        eta = _ts_iso(i.get("expiry"))
-        lines.append(f"- {node} completion={prog} exp={eta}")
+        prog_s = f"{int(float(prog) * 100)}%" if isinstance(prog, (int, float)) else "-"
+        eta = _fmt_remaining(i.get("expiry"))
+        lines.append(f"- {node}｜{atk} vs {dfd}｜进度 {prog_s}｜⏳{eta}")
     return "\n".join(lines)
 
 
@@ -281,86 +371,185 @@ def format_cycles(ws: dict) -> str:
     return "\n".join(lines)
 
 
-def format_void_trader(ws: dict, nodes_map: dict[str, str] | None = None) -> str:
+def format_void_trader(ws: dict, nodes_map: dict[str, str] | None = None, items_map: dict[str, str] | None = None) -> str:
     v = ws.get("voidTrader")
     if not isinstance(v, dict):
-        return "voidTrader: -"
+        return "🧳 奸商：-"
     active = v.get("active")
     loc = _node_name(str(v.get("location") or "-"), nodes_map)
-    exp = _ts_iso(v.get("expiry"))
-    return f"voidTrader: active={active} location={loc} exp={exp}"
+    exp = v.get("expiry")
+    act = v.get("activation")
+    inventory = v.get("inventory") or v.get("manifest")
+    items: list[dict] = inventory if isinstance(inventory, list) else []
+    if active is None:
+        active = _is_active(act, exp)
+    header = ""
+    if active is True:
+        eta = _fmt_remaining(exp)
+        header = f"🧳 奸商｜已到达 {loc}｜剩余⏳{eta}"
+    elif active is False:
+        eta = _fmt_remaining(act)
+        header = f"🧳 奸商｜未到达 {loc}｜距离到达⏳{eta}"
+    else:
+        header = f"🧳 奸商｜位置 {loc}｜⏳{_fmt_remaining(exp)}"
+    if not items:
+        return header
+    lines = [header, "📦 商品清单："]
+    for it in items[:10]:
+        if not isinstance(it, dict):
+            continue
+        unique = it.get("uniqueName")
+        name = it.get("item") or it.get("name")
+        if isinstance(unique, str) and items_map:
+            if unique in items_map:
+                name = items_map.get(unique)
+            else:
+                parts = [p for p in unique.split("/") if p]
+                if parts:
+                    suffix = "/".join(parts[-3:]) if len(parts) > 3 else "/".join(parts)
+                    if suffix in items_map:
+                        name = items_map.get(suffix)
+        if not name:
+            name = "-"
+        ducats = it.get("ducats")
+        credits = it.get("credits")
+        price_bits = []
+        if ducats is not None:
+            price_bits.append(f"{ducats} 杜卡德")
+        if credits is not None:
+            price_bits.append(f"{credits} 信用点")
+        price = " / ".join(price_bits) if price_bits else "-"
+        lines.append(f"- {name}｜{price}")
+    return "\n".join(lines)
 
 
-def format_daily_deals(ws: dict, limit: int = 8) -> str:
+def format_daily_deals(ws: dict, limit: int = 8, items_map: dict[str, str] | None = None) -> str:
     deals = _g(ws, "dailyDeals", default=[])
     if not isinstance(deals, list):
-        return "dailyDeals: -"
-    lines = [f"dailyDeals: {len(deals)}"]
+        return "💰 每日特惠：-"
+    lines = [f"💰 每日特惠（{len(deals)}）"]
     for d in deals[:limit]:
         if not isinstance(d, dict):
             continue
         item = d.get("item") or "-"
+        unique = d.get("uniqueName")
+        if items_map:
+            if isinstance(item, str) and item in items_map:
+                item = items_map[item]
+            elif isinstance(unique, str) and unique in items_map:
+                item = items_map[unique]
+            else:
+                raw = unique if isinstance(unique, str) else item
+                if isinstance(raw, str):
+                    parts = [p for p in raw.split("/") if p]
+                    if parts:
+                        suffix = "/".join(parts[-3:]) if len(parts) > 3 else "/".join(parts)
+                        if suffix in items_map:
+                            item = items_map[suffix]
         price = d.get("salePrice") or d.get("originalPrice") or "-"
-        exp = _ts_iso(d.get("expiry"))
-        lines.append(f"- {item} price={price} exp={exp}")
+        exp = _fmt_remaining(d.get("expiry"))
+        lines.append(f"- {item}｜价格 {price}｜⏳{exp}")
     return "\n".join(lines)
 
 
 def format_sortie(ws: dict, nodes_map: dict[str, str] | None = None) -> str:
     s = ws.get("sortie")
     if not isinstance(s, dict):
-        return "sortie: -"
-    boss = s.get("boss") or "-"
-    exp = _ts_iso(s.get("expiry"))
-    lines = [f"sortie: boss={boss} exp={exp}"]
+        return "⚔️ 突击：-"
+    boss = _translate_boss(s.get("boss") or "-")
+    exp = _fmt_remaining(s.get("expiry"))
+    lines = [f"⚔️ 突击｜首领 {boss}｜⏳{exp}"]
     variants = s.get("variants")
     if isinstance(variants, list):
         for v in variants:
             if not isinstance(v, dict):
                 continue
             node = _node_name(str(v.get("node") or "-"), nodes_map)
-            mtype = v.get("missionType") or "-"
-            mod = v.get("modifier") or "-"
-            lines.append(f"- {node} {mtype} {mod}")
+            mtype = _translate_mission_like(v.get("missionType"))
+            mod = v.get("modifier") or v.get("modifierType") or "-"
+            lines.append(f"- {node}｜{mtype}｜{mod}")
     return "\n".join(lines)
 
 
 def format_archon_hunt(ws: dict, nodes_map: dict[str, str] | None = None) -> str:
     # field name varies by worldstate model; try common keys
-    hunt = ws.get("liteSortie") or ws.get("archonHunt")
+    hunt = ws.get("archonHunt") or ws.get("liteSortie")
     if not isinstance(hunt, dict):
-        return "archon: -"
-    boss = hunt.get("boss") or hunt.get("bossName") or "-"
-    exp = _ts_iso(hunt.get("expiry"))
-    lines = [f"archon: boss={boss} exp={exp}"]
+        return "🧿 执刑官猎杀：-"
+    boss = _translate_boss(hunt.get("boss") or hunt.get("bossName") or "-")
+    exp = _fmt_remaining(hunt.get("expiry"))
+    lines = [f"🧿 执刑官猎杀｜首领 {boss}｜⏳{exp}"]
     missions = hunt.get("missions") or hunt.get("variants")
     if isinstance(missions, list):
         for m in missions:
             if not isinstance(m, dict):
                 continue
             node = _node_name(str(m.get("node") or m.get("location") or "-"), nodes_map)
-            mtype = m.get("missionType") or "-"
-            lines.append(f"- {node} {mtype}")
+            mtype = _translate_mission_like(m.get("missionType"))
+            lines.append(f"- {node}｜{mtype}")
     return "\n".join(lines)
 
 
 def format_arbitration(ws: dict, nodes_map: dict[str, str] | None = None) -> str:
     arb = ws.get("arbitration")
     if not isinstance(arb, dict):
-        return "arbitration: -"
-    node = _node_name(str(arb.get("node") or "-"), nodes_map)
-    mtype = arb.get("type") or arb.get("missionType") or "-"
-    exp = _ts_iso(arb.get("expiry"))
-    return f"arbitration: {node} type={mtype} exp={exp}"
+        return "⚖️ 仲裁：-"
+    raw_node = str(
+        arb.get("node")
+        or arb.get("location")
+        or arb.get("nodeName")
+        or arb.get("nodeKey")
+        or arb.get("planet")
+        or "-"
+    )
+    node = _node_name(raw_node, nodes_map)
+    if node == raw_node and raw_node.startswith("SolNode"):
+        node = "未知地点"
+    mtype = _translate_mission_like(arb.get("type") or arb.get("missionType"))
+    if mtype in {"Unknown", "unknown"}:
+        mtype = "未知"
+    exp = _fmt_remaining(arb.get("expiry"))
+    if node == "未知地点" and mtype == "未知" and exp == "-":
+        return "⚖️ 仲裁：暂无数据"
+    return f"⚖️ 仲裁｜{node}｜{mtype}｜⏳{exp}"
 
 
 def format_steel_path(ws: dict) -> str:
     sp = ws.get("steelPath") or ws.get("steelPathOffering")
     if not isinstance(sp, dict):
-        return "steelPath: -"
-    exp = _ts_iso(sp.get("expiry"))
+        return "🟥 钢铁奖励：-"
+    exp = _fmt_remaining(sp.get("expiry"))
     rotation = sp.get("rotation") or sp.get("name") or "-"
-    return f"steelPath: rotation={rotation} exp={exp}"
+    current = sp.get("currentReward")
+    next_reward = sp.get("nextReward")
+    remaining = sp.get("remaining")
+    lines = [f"🟥 钢铁奖励｜⏳{exp}"]
+    if isinstance(current, dict):
+        name = current.get("name") or current.get("item") or "-"
+        cost = current.get("cost")
+        lines.append(f"📦 当前：{name}{f'（{cost} 余烬）' if cost is not None else ''}")
+    elif isinstance(current, str):
+        lines.append(f"📦 当前：{current}")
+    if isinstance(next_reward, dict):
+        name = next_reward.get("name") or next_reward.get("item") or "-"
+        cost = next_reward.get("cost")
+        lines.append(f"✨ 下次：{name}{f'（{cost} 余烬）' if cost is not None else ''}")
+    elif isinstance(next_reward, str):
+        lines.append(f"✨ 下次：{next_reward}")
+    if isinstance(remaining, str) and remaining:
+        lines.append(f"⏰ 剩余：{remaining}")
+    if isinstance(rotation, list):
+        for it in rotation[:6]:
+            if not isinstance(it, dict):
+                continue
+            name = it.get("name") or it.get("item") or "-"
+            cost = it.get("cost")
+            if cost is not None:
+                lines.append(f"- {name}｜{cost} 余烬")
+            else:
+                lines.append(f"- {name}")
+        return "\n".join(lines)
+    return f"🟥 钢铁奖励｜{rotation}｜⏳{exp}"
 
 
 def format_duviri_cycle(ws: dict) -> str:
@@ -376,7 +565,17 @@ def format_duviri_cycle(ws: dict) -> str:
 def format_nightwave(ws: dict) -> str:
     n = ws.get("seasonInfo") or ws.get("nightwave")
     if not isinstance(n, dict):
-        return "nightwave: -"
-    tag = n.get("tag") or n.get("season") or "-"
-    exp = _ts_iso(n.get("expiry"))
-    return f"nightwave: {tag} exp={exp}"
+        return "📡 电波：-"
+    season = n.get("season")
+    tag = n.get("tag") or "-"
+    if isinstance(season, (int, float)) or (isinstance(season, str) and str(season).isdigit()):
+        tag = f"第{season}期"
+    elif isinstance(tag, str) and tag != "-":
+        t = tag
+        t = t.replace("RadioLegion", "电波")
+        t = t.replace("Intermission", "中场")
+        t = t.replace("Syndicate", "")
+        t = t.replace("  ", " ").strip()
+        tag = t
+    exp = _fmt_remaining(n.get("expiry"))
+    return f"📡 电波｜{tag}｜⏳{exp}"

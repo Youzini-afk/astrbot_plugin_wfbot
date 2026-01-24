@@ -67,6 +67,7 @@ class WarframeDataSource:
             retry_backoff_seconds=cfg.retry_backoff_seconds,
             max_request_time_seconds=cfg.http_max_request_time_seconds,
             no_proxy_suffixes=cfg.http_no_proxy_suffixes if cfg.http_no_proxy_enabled else (),
+            proxy_url=cfg.http_proxy_url,
         )
         return cls(
             config=cfg,

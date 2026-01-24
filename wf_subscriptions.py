@@ -224,6 +224,28 @@ class SubscriptionStore:
             return True
         return False
 
+    def set_last_ids(self, data: dict[str, Any], *, umo: str, uid: str | None, topic: str, ids: list[str]) -> bool:
+        items = data.get("items")
+        if not isinstance(items, list):
+            return False
+        norm_ids = [str(x) for x in ids if x is not None]
+        for it in items:
+            if not isinstance(it, dict) or it.get("umo") != umo or it.get("uid") != uid:
+                continue
+            topics = it.get("topics")
+            if not isinstance(topics, dict):
+                return False
+            meta = topics.get(topic)
+            if not isinstance(meta, dict):
+                return False
+            if meta.get("last_ids") == norm_ids:
+                return False
+            meta["last_ids"] = norm_ids
+            meta["updated_at"] = _utcnow_iso()
+            it["updated_at"] = _utcnow_iso()
+            return True
+        return False
+
     def set_last_pre_sig(self, data: dict[str, Any], *, umo: str, uid: str | None, topic: str, sig: str | None) -> bool:
         items = data.get("items")
         if not isinstance(items, list):

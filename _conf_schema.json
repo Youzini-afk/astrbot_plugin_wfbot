@@ -40,6 +40,12 @@
     "type": "object",
     "description": "网络与代理",
     "items": {
+      "proxy_url": {
+        "type": "string",
+        "default": "",
+        "description": "强制使用代理（可选）",
+        "hint": "填写完整代理地址，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890。留空则使用系统环境代理。"
+      },
       "max_request_time_seconds": {
         "type": "int",
         "default": 30,
@@ -166,6 +172,91 @@
         "default": 0,
         "description": "平原/循环订阅默认提前/后置分钟数（>0 提前，<0 后置）",
         "hint": "当你执行“/wf 订阅 夜灵平原 夜晚”且未指定时间（如 10/提前10/后置10）时，使用此默认值；0 表示仅在指令显式指定时才提醒。"
+      },
+      "notify_mode_default": {
+        "type": "string",
+        "default": "change",
+        "options": ["change", "new_only"],
+        "description": "订阅通知策略默认值",
+        "hint": "change=订阅内容有变化就通知；new_only=仅新出现条目才通知。"
+      },
+      "notify_modes": {
+        "type": "object",
+        "description": "按类型覆盖通知策略",
+        "items": {
+          "alerts": {
+            "type": "string",
+            "default": "new_only",
+            "options": ["change", "new_only"],
+            "description": "警报通知策略"
+          },
+          "invasions": {
+            "type": "string",
+            "default": "new_only",
+            "options": ["change", "new_only"],
+            "description": "入侵通知策略"
+          },
+          "fissures": {
+            "type": "string",
+            "default": "new_only",
+            "options": ["change", "new_only"],
+            "description": "裂缝通知策略"
+          },
+          "daily_deals": {
+            "type": "string",
+            "default": "new_only",
+            "options": ["change", "new_only"],
+            "description": "每日特惠通知策略"
+          },
+          "arbitration": {
+            "type": "string",
+            "default": "new_only",
+            "options": ["change", "new_only"],
+            "description": "仲裁通知策略"
+          },
+          "void_trader": {
+            "type": "string",
+            "default": "new_only",
+            "options": ["change", "new_only"],
+            "description": "奸商通知策略"
+          },
+          "steel_path": {
+            "type": "string",
+            "default": "new_only",
+            "options": ["change", "new_only"],
+            "description": "钢铁奖励通知策略"
+          },
+          "sortie": {
+            "type": "string",
+            "default": "change",
+            "options": ["change", "new_only"],
+            "description": "突击通知策略"
+          },
+          "archon": {
+            "type": "string",
+            "default": "change",
+            "options": ["change", "new_only"],
+            "description": "执刑官猎杀通知策略"
+          },
+          "cycles": {
+            "type": "string",
+            "default": "change",
+            "options": ["change", "new_only"],
+            "description": "平原/循环通知策略"
+          },
+          "duviri": {
+            "type": "string",
+            "default": "change",
+            "options": ["change", "new_only"],
+            "description": "轮换通知策略"
+          },
+          "nightwave": {
+            "type": "string",
+            "default": "change",
+            "options": ["change", "new_only"],
+            "description": "电波通知策略"
+          }
+        }
       }
     }
   },

@@ -10,11 +10,15 @@ from typing import Iterable
 
 from astrbot.api import logger  # type: ignore
 import aiofiles
+import aiohttp
 
 from .wf_cache import FileCache
 from .wf_http import HttpClient
 
-PUBLIC_EXPORT_INDEX_URL = "https://origin.warframe.com/PublicExport/index_%s.txt.lzma"
+PUBLIC_EXPORT_INDEX_URLS = [
+    "https://origin.warframe.com/PublicExport/index_%s.txt.lzma",
+    "https://content.warframe.com/PublicExport/index_%s.txt.lzma",
+]
 PUBLIC_EXPORT_MANIFEST_URL = "http://content.warframe.com/PublicExport/Manifest/%s"
 
 _SAFE_EXPORT_FILENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,240}\.json$", re.IGNORECASE)
@@ -80,45 +84,94 @@ class PublicExportClient:
         self._http = http
         self._cache = cache
 
+    async def _fetch_index_bytes(self, *, language: str, attempt: int) -> tuple[bytes | None, int]:
+        urls = []
+        for base in PUBLIC_EXPORT_INDEX_URLS:
+            url = base % language
+            if attempt > 0:
+                url = f"{url}?t={int(time.time())}"
+            urls.append(url)
+        last_status = 0
+        for url in urls:
+            try:
+                resp = await self._http.get(url)
+            except Exception:
+                continue
+            last_status = int(resp.status or 0)
+            if not (200 <= resp.status < 300):
+                continue
+            raw = resp.body
+            if not raw or len(raw) < 32:
+                continue
+            try:
+                _ = await asyncio.to_thread(lzma.decompress, raw)
+            except lzma.LZMAError:
+                continue
+            return raw, last_status
+        # fallback: force system proxy (trust_env=True) for warframe.com if direct fails
+        try:
+            timeout = aiohttp.ClientTimeout(total=30)
+            headers = {
+                "Accept": "*/*",
+                "Connection": "keep-alive",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            }
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+                for url in urls:
+                    try:
+                        async with session.get(url, headers=headers) as resp:
+                            last_status = int(resp.status or 0)
+                            if not (200 <= resp.status < 300):
+                                continue
+                            raw = await resp.read()
+                    except Exception:
+                        continue
+                    if not raw or len(raw) < 32:
+                        continue
+                    try:
+                        _ = await asyncio.to_thread(lzma.decompress, raw)
+                    except lzma.LZMAError:
+                        continue
+                    return raw, last_status
+        except Exception:
+            pass
+        return None, last_status
+
     async def update(self, *, language: str = "zh") -> PublicExportUpdateResult:
         index_path = self._cache.path("public_export", f"index_{language}.txt.lzma")
         index_text_path = self._cache.path("public_export", f"index_{language}.txt")
         export_dir = self._cache.path("public_export", "export")
 
-        index_url = PUBLIC_EXPORT_INDEX_URL % language
         last_status = 0
         decompressed: bytes | None = None
-        # index is sometimes served partially; if cached file becomes corrupted, delete and retry once.
+        raw_bytes: bytes | None = None
         for attempt in range(2):
-            url = index_url if attempt == 0 else f"{index_url}?t={int(time.time())}"
-            resp = await self._http.download_to(url, str(index_path))
-            last_status = int(resp.status or 0)
-            if not (200 <= resp.status < 300):
-                return PublicExportUpdateResult(
-                    language=language,
-                    index_status=resp.status,
-                    changed_files=[],
-                    downloaded_files=[],
-                )
-
+            raw_bytes, last_status = await self._fetch_index_bytes(language=language, attempt=attempt)
+            if raw_bytes is None:
+                logger.warning("public export index fetch failed (attempt=%s)", attempt + 1)
+                continue
             try:
-                async with aiofiles.open(index_path, "rb") as f:
-                    raw = await f.read()
-                if len(raw) < 32:
-                    raise lzma.LZMAError("index file too small")
-                decompressed = await asyncio.to_thread(lzma.decompress, raw)
+                decompressed = await asyncio.to_thread(lzma.decompress, raw_bytes)
                 break
-            except (FileNotFoundError, lzma.LZMAError) as e:
+            except lzma.LZMAError as e:
                 logger.warning("public export index decompress failed (attempt=%s): %s", attempt + 1, e)
-                try:
-                    await asyncio.to_thread(index_path.unlink)
-                except FileNotFoundError:
-                    pass
-                try:
-                    await asyncio.to_thread(index_text_path.unlink)
-                except FileNotFoundError:
-                    pass
+                raw_bytes = None
                 decompressed = None
+
+        if decompressed is None:
+            # fallback to cached index file (if any)
+            try:
+                if await asyncio.to_thread(index_path.exists):
+                    async with aiofiles.open(index_path, "rb") as f:
+                        cached_raw = await f.read()
+                    if cached_raw and len(cached_raw) >= 32:
+                        decompressed = await asyncio.to_thread(lzma.decompress, cached_raw)
+                        raw_bytes = cached_raw
+            except Exception as e:
+                logger.warning("public export cached index decompress failed: %s", e)
 
         if decompressed is None:
             return PublicExportUpdateResult(
@@ -129,6 +182,9 @@ class PublicExportClient:
             )
 
         await asyncio.to_thread(index_text_path.parent.mkdir, parents=True, exist_ok=True)
+        if raw_bytes is not None:
+            async with aiofiles.open(index_path, "wb") as f:
+                await f.write(raw_bytes)
         async with aiofiles.open(index_text_path, "wb") as f:
             await f.write(decompressed)
 

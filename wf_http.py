@@ -57,6 +57,7 @@ class HttpClient:
         retries: int = 2,
         retry_backoff_seconds: float = 2.0,
         max_request_time_seconds: float | None = 30.0,
+        proxy_url: str | None = None,
     ) -> None:
         self._timeout = aiohttp.ClientTimeout(total=max(connect_timeout, read_timeout))
         self._user_agent = user_agent or (
@@ -67,6 +68,7 @@ class HttpClient:
         self._retries = int(max(0, retries))
         self._retry_backoff_seconds = float(max(0.0, retry_backoff_seconds))
         self._max_request_time_seconds = None if max_request_time_seconds is None else float(max(0.0, max_request_time_seconds))
+        self._proxy_url = proxy_url if proxy_url else None
 
         self._session_env: aiohttp.ClientSession | None = None
         self._session_direct: aiohttp.ClientSession | None = None
@@ -101,7 +103,7 @@ class HttpClient:
             attempt += 1
             try:
                 session = await self._session_for_url(url)
-                async with session.get(url, headers=dict(request_headers)) as resp:
+                async with session.get(url, headers=dict(request_headers), proxy=self._proxy_url) as resp:
                     body = await resp.read()
                     return HttpResponse(
                         status=int(resp.status),

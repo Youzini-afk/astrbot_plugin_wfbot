@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -74,6 +75,15 @@ class WarframeDatasourcePlugin(Star):
             return {s} if s else set()
         return set()
 
+    @staticmethod
+    def _tail_segments(path: str, n: int) -> str | None:
+        parts = [p for p in str(path).split("/") if p]
+        if not parts:
+            return None
+        if len(parts) <= n:
+            return "/".join(parts)
+        return "/".join(parts[-n:])
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -121,6 +131,9 @@ class WarframeDatasourcePlugin(Star):
             no_proxy_suffixes = tuple(str(x).strip() for x in no_proxy_suffixes_raw if str(x).strip())
         else:
             no_proxy_suffixes = ("warframe.com",)
+        proxy_url = str(http_cfg.get("proxy_url", "")).strip()
+        if not proxy_url:
+            proxy_url = None
 
         wf_cfg = WarframeConfig(
             data_dir=data_dir,
@@ -135,6 +148,7 @@ class WarframeDatasourcePlugin(Star):
             http_max_request_time_seconds=max_req_time_f,
             http_no_proxy_enabled=bool(http_cfg.get("no_proxy_enabled", True)),
             http_no_proxy_suffixes=no_proxy_suffixes,
+            http_proxy_url=proxy_url,
         )
 
         self.img_cfg = ImageRenderConfig(
@@ -156,6 +170,9 @@ class WarframeDatasourcePlugin(Star):
         self.mgr = self.ds.create_manager()
 
         self._cycles_default_offset_seconds = int(subs_cfg.get("cycles_default_offset_minutes", 0)) * 60
+        self._notify_mode_default = str(subs_cfg.get("notify_mode_default", "change") or "change").lower()
+        notify_modes = subs_cfg.get("notify_modes", {})
+        self._notify_mode_overrides = notify_modes if isinstance(notify_modes, dict) else {}
         self._simplify_zh = bool(i18n_cfg.get("simplify_zh", True))
         self._group_admins = self._parse_admin_mapping(admin_cfg.get("group_admins", {}), key_field="group_id")
         self._session_admins = self._parse_admin_mapping(admin_cfg.get("session_admins", {}), key_field="session")
@@ -166,6 +183,17 @@ class WarframeDatasourcePlugin(Star):
         self._sub_tick_task: asyncio.Task | None = None
         self._cycle_mem: dict[str, dict[str, float | str]] = {}
         self._push_enabled: bool = True
+        self._subscribe_enabled: bool = True
+        self._extras_lock = asyncio.Lock()
+        self._extras_cache: dict[str, dict] = {}
+        self._extras_cache_at: float | None = None
+        self._extras_cache_ttl = 120.0
+        self._translation_cache: dict[str, str] = {}
+        self._translation_cache_at: float | None = None
+        self._translation_cache_ttl = 1800.0
+        self._pex_translation_cache: dict[str, str] = {}
+        self._pex_translation_cache_at: float | None = None
+        self._pex_translation_cache_ttl = 21600.0
 
         self._task: asyncio.Task | None = None
         try:
@@ -183,6 +211,11 @@ class WarframeDatasourcePlugin(Star):
                     self._push_enabled = bool(val)
                 except Exception:
                     logger.debug("load kv wf_push_enabled failed", exc_info=True)
+                try:
+                    val = await getter("wf_subscribe_enabled", True)
+                    self._subscribe_enabled = bool(val)
+                except Exception:
+                    logger.debug("load kv wf_subscribe_enabled failed", exc_info=True)
             self._maybe_start_background()
 
     def _resolve_plugin_data_dir(self) -> Path:
@@ -206,6 +239,8 @@ class WarframeDatasourcePlugin(Star):
         return Path(__file__).resolve().parent / ".plugin_data"
 
     async def _send_text_or_image(self, event: AstrMessageEvent, *, title: str, text: str):
+        text = self._normalize_output_text(text)
+        title = self._normalize_output_text(title)
         if not self.img_cfg.enabled:
             yield event.chain_result([Comp.Plain(text)])
             return
@@ -218,6 +253,7 @@ class WarframeDatasourcePlugin(Star):
         yield event.chain_result([Comp.Image.fromFileSystem(str(path))])
 
     async def _push_plain_text(self, unified_msg_origin: str, text: str) -> bool:
+        text = self._normalize_output_text(text)
         try:
             from astrbot.api.event import MessageChain
 
@@ -247,6 +283,8 @@ class WarframeDatasourcePlugin(Star):
         comps: list,
         fallback_text: str | None = None,
     ) -> bool:
+        if fallback_text is not None:
+            fallback_text = self._normalize_output_text(fallback_text)
         base = list(comps)
         if user_id:
             at = self._try_build_at(user_id)
@@ -276,6 +314,8 @@ class WarframeDatasourcePlugin(Star):
         return False
 
     async def _push_text_or_image(self, unified_msg_origin: str, *, title: str, text: str) -> bool:
+        text = self._normalize_output_text(text)
+        title = self._normalize_output_text(title)
         if not self.img_cfg.enabled:
             return await self._push_plain_text(unified_msg_origin, text)
 
@@ -301,6 +341,8 @@ class WarframeDatasourcePlugin(Star):
     ) -> bool:
         if not self._push_enabled:
             return False
+        text = self._normalize_output_text(text)
+        title = self._normalize_output_text(title)
         if platform == "aiocqhttp" and user_id and group_id:
             ok = await self._send_aiocqhttp_at_message(group_id=group_id, user_id=user_id, text=text)
             if ok:
@@ -392,6 +434,23 @@ class WarframeDatasourcePlugin(Star):
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         return self._is_astrbot_admin(event) or self._is_custom_admin(event)
 
+    def _normalize_output_text(self, text: str) -> str:
+        s = text or ""
+        if self._simplify_zh and s:
+            return to_simplified_zh(s)
+        return s
+
+    def _notify_mode_for_topic(self, topic: str) -> str:
+        base, _ = self._parse_topic_id(topic)
+        mode = None
+        if isinstance(self._notify_mode_overrides, dict):
+            mode = self._notify_mode_overrides.get(base)
+        if isinstance(mode, str):
+            mode = mode.lower().strip()
+        if mode not in {"change", "new_only"}:
+            mode = self._notify_mode_default if self._notify_mode_default in {"change", "new_only"} else "change"
+        return mode
+
     async def _clear_image_cache(self) -> int:
         def _clear_sync(folder: Path) -> int:
             if not folder.exists():
@@ -435,7 +494,12 @@ class WarframeDatasourcePlugin(Star):
         nodes = build_nodes_map(nodes_raw)
         sol = build_nodes_map(sol_raw)
         if sol:
-            nodes.update(sol)
+            for k, v in sol.items():
+                nodes.setdefault(k, v)
+        state_map = await self._build_state_translation_map()
+        if state_map:
+            for k, v in state_map.items():
+                nodes.setdefault(k, v)
         if self._simplify_zh and nodes:
             nodes = {k: to_simplified_zh(v) for k, v in nodes.items() if isinstance(v, str)}
         return nodes
@@ -467,6 +531,297 @@ class WarframeDatasourcePlugin(Star):
             out["duviriCycle"] = duviri
             out["duvalierCycle"] = duviri
         return out
+
+    def _normalize_warframestat_arbitration(self, data: dict) -> dict:
+        return {
+            "node": data.get("node") or data.get("nodeKey") or data.get("location") or data.get("nodeName"),
+            "type": data.get("type") or data.get("typeKey") or data.get("missionType") or data.get("missionTypeKey"),
+            "expiry": data.get("expiry") or data.get("endTime"),
+            "activation": data.get("activation") or data.get("startTime"),
+        }
+
+    def _normalize_warframestat_steel_path(self, data: dict) -> dict:
+        rotation = data.get("rotation") or data.get("items") or data.get("offers")
+        current = data.get("currentReward")
+        next_reward = data.get("nextReward")
+        remaining = data.get("remaining")
+        if isinstance(current, dict):
+            current = {"name": current.get("name") or current.get("item"), "cost": current.get("cost")}
+        if isinstance(next_reward, dict):
+            next_reward = {"name": next_reward.get("name") or next_reward.get("item"), "cost": next_reward.get("cost")}
+        out_items: list[dict] | None = None
+        if isinstance(rotation, list):
+            out_items = []
+            for it in rotation:
+                if not isinstance(it, dict):
+                    continue
+                name = it.get("name") or it.get("item") or it.get("storeItem") or it.get("title")
+                cost = it.get("cost") or it.get("price") or it.get("shopCost")
+                out_items.append({"name": name, "cost": cost})
+        return {
+            "expiry": data.get("expiry") or data.get("endTime"),
+            "rotation": out_items if out_items is not None else rotation,
+            "currentReward": current,
+            "nextReward": next_reward,
+            "remaining": remaining,
+        }
+
+    def _normalize_warframestat_void_trader(self, data: dict) -> dict:
+        inventory = data.get("inventory") or data.get("items") or data.get("manifest")
+        return {
+            "location": data.get("location") or data.get("node"),
+            "activation": data.get("activation"),
+            "expiry": data.get("expiry"),
+            "character": data.get("character"),
+            "inventory": inventory if isinstance(inventory, list) else [],
+        }
+
+    def _normalize_warframestat_sortie(self, data: dict) -> dict:
+        variants = data.get("variants")
+        out_vars: list[dict] | None = None
+        if isinstance(variants, list):
+            out_vars = []
+            for v in variants:
+                if not isinstance(v, dict):
+                    continue
+                out_vars.append(
+                    {
+                        "node": v.get("node") or v.get("nodeKey"),
+                        "missionType": v.get("missionType") or v.get("missionTypeKey") or v.get("type") or v.get("typeKey"),
+                        "modifier": v.get("modifier") or v.get("modifierDescription"),
+                    }
+                )
+        return {
+            "boss": data.get("boss") or data.get("bossName"),
+            "expiry": data.get("expiry") or data.get("endTime"),
+            "variants": out_vars if out_vars is not None else variants,
+        }
+
+    def _normalize_warframestat_archon(self, data: dict) -> dict:
+        missions = data.get("missions") or data.get("variants")
+        out_m: list[dict] | None = None
+        if isinstance(missions, list):
+            out_m = []
+            for m in missions:
+                if not isinstance(m, dict):
+                    continue
+                out_m.append(
+                    {
+                        "node": m.get("node") or m.get("nodeKey") or m.get("location"),
+                        "missionType": m.get("type") or m.get("typeKey") or m.get("missionType") or m.get("missionTypeKey"),
+                    }
+                )
+        return {
+            "boss": data.get("boss") or data.get("bossName"),
+            "expiry": data.get("expiry") or data.get("endTime"),
+            "missions": out_m if out_m is not None else missions,
+        }
+
+    async def _fetch_warframestat_json(self, endpoint: str) -> dict | None:
+        lang = str(self.config.get("public_export_language", "zh") or "zh")
+        urls = [
+            f"https://api.warframestat.us/pc/{endpoint}?language={lang}",
+            f"https://r.jina.ai/http://api.warframestat.us/pc/{endpoint}?language={lang}",
+            f"https://r.jina.ai/https://api.warframestat.us/pc/{endpoint}?language={lang}",
+        ]
+        for url in urls:
+            try:
+                resp = await self.ds.http.get(url)
+            except Exception:
+                continue
+            if not (200 <= resp.status < 400):
+                continue
+            try:
+                data = resp.json()
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                return data
+        logger.debug("warframestat fetch failed: %s", endpoint, exc_info=True)
+        return None
+
+    async def _get_extras_cache(self) -> dict[str, dict]:
+        now = time.monotonic()
+        if self._extras_cache_at is not None and (now - self._extras_cache_at) <= self._extras_cache_ttl:
+            return dict(self._extras_cache)
+        async with self._extras_lock:
+            now = time.monotonic()
+            if self._extras_cache_at is not None and (now - self._extras_cache_at) <= self._extras_cache_ttl:
+                return dict(self._extras_cache)
+            extras: dict[str, dict] = {}
+            arb = await self._fetch_warframestat_json("arbitration")
+            if isinstance(arb, dict):
+                extras["arbitration"] = self._normalize_warframestat_arbitration(arb)
+            sp = await self._fetch_warframestat_json("steelPath")
+            if isinstance(sp, dict):
+                extras["steelPathOffering"] = self._normalize_warframestat_steel_path(sp)
+            vt = await self._fetch_warframestat_json("voidTrader")
+            if isinstance(vt, dict):
+                extras["voidTrader"] = self._normalize_warframestat_void_trader(vt)
+            so = await self._fetch_warframestat_json("sortie")
+            if isinstance(so, dict):
+                extras["sortie"] = self._normalize_warframestat_sortie(so)
+            ah = await self._fetch_warframestat_json("archonHunt")
+            if isinstance(ah, dict):
+                extras["archonHunt"] = self._normalize_warframestat_archon(ah)
+            self._extras_cache = extras
+            self._extras_cache_at = time.monotonic()
+            return dict(extras)
+
+    async def _merge_extras_ws(self, ws: dict) -> dict:
+        need_arb = not isinstance(ws.get("arbitration"), dict)
+        sp = ws.get("steelPathOffering") or ws.get("steelPath")
+        need_sp = not isinstance(sp, dict) or not (sp.get("rotation") or sp.get("currentReward") or sp.get("nextReward"))
+        vt = ws.get("voidTrader")
+        inv = vt.get("inventory") if isinstance(vt, dict) else None
+        if not isinstance(inv, list):
+            inv = vt.get("manifest") if isinstance(vt, dict) else None
+        has_names = False
+        if isinstance(inv, list):
+            for it in inv:
+                if not isinstance(it, dict):
+                    continue
+                if it.get("item") or it.get("name"):
+                    has_names = True
+                    break
+        need_vt = not isinstance(vt, dict) or not isinstance(inv, list) or not has_names
+        sortie = ws.get("sortie")
+        need_sortie = (
+            not isinstance(sortie, dict)
+            or not isinstance(sortie.get("variants"), list)
+            or not isinstance(sortie.get("boss"), str)
+            or str(sortie.get("boss")).startswith("SORTIE_")
+        )
+        archon = ws.get("liteSortie") or ws.get("archonHunt")
+        need_archon = (
+            not isinstance(archon, dict)
+            or not isinstance(archon.get("missions") or archon.get("variants"), list)
+            or not isinstance(archon.get("boss") or archon.get("bossName"), str)
+            or str(archon.get("boss") or archon.get("bossName")).startswith("SORTIE_")
+        )
+        if not need_arb and not need_sp and not need_vt and not need_sortie and not need_archon:
+            return ws
+        extras = await self._get_extras_cache()
+        if not extras:
+            return ws
+        out = dict(ws)
+        if need_arb and isinstance(extras.get("arbitration"), dict):
+            out["arbitration"] = extras["arbitration"]
+        if need_sp and isinstance(extras.get("steelPathOffering"), dict):
+            out["steelPathOffering"] = extras["steelPathOffering"]
+        if need_vt and isinstance(extras.get("voidTrader"), dict):
+            merged = dict(out.get("voidTrader") or {})
+            merged.update(extras["voidTrader"])
+            out["voidTrader"] = merged
+        if need_sortie and isinstance(extras.get("sortie"), dict):
+            out["sortie"] = extras["sortie"]
+        if need_archon and isinstance(extras.get("archonHunt"), dict):
+            out["archonHunt"] = extras["archonHunt"]
+        return out
+
+    async def _build_state_translation_map(self) -> dict[str, str]:
+        now = time.monotonic()
+        if self._translation_cache_at is not None and (now - self._translation_cache_at) <= self._translation_cache_ttl:
+            return dict(self._translation_cache)
+        raw = await self.mgr.get_mirror_cached("state_translation")
+        mapping: dict[str, str] = {}
+        if isinstance(raw, list):
+            for it in raw:
+                if not isinstance(it, dict):
+                    continue
+                key = it.get("uniqueName")
+                name = it.get("name")
+                if isinstance(key, str) and key and isinstance(name, str) and name:
+                    if self._simplify_zh:
+                        name = to_simplified_zh(name)
+                    mapping[key] = name
+                    for n in (1, 2, 3, 4):
+                        suffix = self._tail_segments(key, n)
+                        if suffix and suffix not in mapping:
+                            mapping[suffix] = name
+        elif isinstance(raw, dict):
+            for k, v in raw.items():
+                if isinstance(k, str) and isinstance(v, str):
+                    mapping[k] = to_simplified_zh(v) if self._simplify_zh else v
+        if mapping:
+            self._translation_cache = mapping
+            self._translation_cache_at = time.monotonic()
+        return dict(mapping)
+
+    async def _build_public_export_translation_map(self) -> dict[str, str]:
+        now = time.monotonic()
+        if self._pex_translation_cache_at is not None and (now - self._pex_translation_cache_at) <= self._pex_translation_cache_ttl:
+            return dict(self._pex_translation_cache)
+
+        lang = str(self.config.get("public_export_language", "zh") or "zh")
+        sources = [
+            ("ExportCustoms", "ExportCustoms"),
+            ("ExportDrones", "ExportDrones"),
+            ("ExportFlavour", "ExportFlavour"),
+            ("ExportGear", "ExportGear"),
+            ("ExportKeys", "ExportKeys"),
+            ("ExportRelicArcane", "ExportRelicArcane"),
+            ("ExportResources", "ExportResources"),
+            ("ExportSentinels", "ExportSentinels"),
+            ("ExportSortieRewards", "ExportOther"),
+            ("ExportUpgrades", "ExportUpgrades"),
+            ("ExportWarframes", "ExportWarframes"),
+            ("ExportWeapons", "ExportWeapons"),
+        ]
+
+        def build_sync() -> dict[str, str]:
+            mapping: dict[str, str] = {}
+            for base, key in sources:
+                filename = f"{base}_{lang}.json"
+                path = self.ds.public_export.export_path(filename)
+                if not path.exists():
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                    data = json.loads(text)
+                except Exception:
+                    continue
+                arr = data.get(key)
+                if not isinstance(arr, list):
+                    continue
+                for it in arr:
+                    if not isinstance(it, dict):
+                        continue
+                    unique = it.get("uniqueName") or it.get("itemUniqueName") or it.get("Item")
+                    name = it.get("name") or it.get("itemName") or it.get("productName") or it.get("fullName") or it.get("title")
+                    if not isinstance(unique, str) or not unique or not isinstance(name, str) or not name:
+                        continue
+                    if unique not in mapping:
+                        mapping[unique] = name
+                    for n in (3, 4):
+                        suffix = WarframeDatasourcePlugin._tail_segments(unique, n)
+                        if suffix and suffix not in mapping:
+                            mapping[suffix] = name
+            return mapping
+
+        mapping = await asyncio.to_thread(build_sync)
+        if mapping:
+            self._pex_translation_cache = mapping
+            self._pex_translation_cache_at = time.monotonic()
+        return dict(mapping)
+
+    async def _build_item_translation_map(self) -> dict[str, str]:
+        state_map = await self._build_state_translation_map()
+        export_map = await self._build_public_export_translation_map()
+        merged = dict(export_map)
+        merged.update(state_map)
+        return merged
+
+    def _translate_label(self, raw: str, mapping: dict[str, str]) -> str:
+        if not raw:
+            return raw
+        if raw in mapping:
+            return mapping[raw]
+        for n in (3, 4):
+            suffix = self._tail_segments(raw, n)
+            if suffix and suffix in mapping:
+                return mapping[suffix]
+        return raw
 
     def _parse_topic_id(self, topic_id: str) -> tuple[str, dict[str, str]]:
         if "|" not in topic_id:
@@ -823,6 +1178,9 @@ class WarframeDatasourcePlugin(Star):
         nodes = await self._build_nodes_map()
         base, filters = self._parse_topic_id(topic)
 
+        if base in {"arbitration", "steel_path", "sortie", "archon"}:
+            ws = await self._merge_extras_ws(ws)
+
         if base == "alerts":
             return "警报", format_alerts(ws, nodes_map=nodes)
         if base == "invasions":
@@ -835,9 +1193,12 @@ class WarframeDatasourcePlugin(Star):
             msg = self._format_fissures_filtered(ws, nodes_map=nodes, kind=kind, tier=tier, mission=mission)
             return title, msg
         if base == "void_trader":
-            return "奸商", format_void_trader(ws)
+            ws = await self._merge_extras_ws(ws)
+            items_map = await self._build_item_translation_map()
+            return "奸商", format_void_trader(ws, nodes_map=nodes, items_map=items_map)
         if base == "daily_deals":
-            return "每日特惠", format_daily_deals(ws)
+            items_map = await self._build_item_translation_map()
+            return "每日特惠", format_daily_deals(ws, items_map=items_map)
         if base == "sortie":
             return "突击", format_sortie(ws, nodes_map=nodes)
         if base == "archon":
@@ -851,12 +1212,14 @@ class WarframeDatasourcePlugin(Star):
             desired = (filters.get("state") or "").lower() or None
             title = self._topic_label(topic) or "循环"
             ws2 = dict(ws)
-            ws2.update(await self._build_cycles_ws())
+            if "earthCycle" not in ws2 and "cetusCycle" not in ws2:
+                ws2.update(await self._build_cycles_ws())
             msg = self._format_cycles_filtered(ws2, zone=zone, desired_state=desired)
             return title, msg
         if base == "duviri":
             ws2 = dict(ws)
-            ws2.update(await self._build_cycles_ws())
+            if "duviriCycle" not in ws2 and "duvalierCycle" not in ws2:
+                ws2.update(await self._build_cycles_ws())
             return "轮换", format_duviri_cycle(ws2)
         if base == "nightwave":
             return "电波", format_nightwave(ws)
@@ -1247,6 +1610,188 @@ class WarframeDatasourcePlugin(Star):
             if changed:
                 await self._sub_store.save(data2)
 
+    def _fissure_ids_for_topic(self, topic: str, ws: dict) -> list[str]:
+        base, filters = self._parse_topic_id(topic)
+        if base != "fissures":
+            return []
+        kind = (filters.get("kind") or "normal").lower()
+        tier = (filters.get("tier") or "").lower() or None
+        mission = (filters.get("mission") or "").lower() or None
+        return self._collect_fissure_ids(ws, kind=kind, tier=tier, mission=mission)
+
+    def _alert_ids_for_topic(self, ws: dict) -> list[str]:
+        alerts = ws.get("alerts", [])
+        if not isinstance(alerts, list):
+            return []
+        ids: list[str] = []
+        for a in alerts:
+            if not isinstance(a, dict):
+                continue
+            aid = a.get("id") or a.get("_id")
+            if not aid:
+                mi = a.get("missionInfo") or {}
+                loc = mi.get("location") or mi.get("locationKey") or a.get("location") or ""
+                mt = mi.get("missionType") or mi.get("missionTypeKey") or a.get("missionType") or ""
+                exp = a.get("expiry") or a.get("endTime") or ""
+                aid = f"{loc}|{mt}|{exp}"
+            ids.append(str(aid))
+        return ids
+
+    def _invasion_ids_for_topic(self, ws: dict) -> list[str]:
+        inv = ws.get("invasions", [])
+        if not isinstance(inv, list):
+            return []
+        ids: list[str] = []
+        for i in inv:
+            if not isinstance(i, dict) or i.get("completed"):
+                continue
+            iid = i.get("id") or i.get("_id")
+            if not iid:
+                node = i.get("node") or ""
+                atk = i.get("attackingFaction") or ""
+                deff = i.get("defendingFaction") or ""
+                exp = i.get("expiry") or ""
+                iid = f"{node}|{atk}|{deff}|{exp}"
+            ids.append(str(iid))
+        return ids
+
+    def _daily_deal_ids_for_topic(self, ws: dict) -> list[str]:
+        deals = ws.get("dailyDeals", [])
+        if not isinstance(deals, list):
+            return []
+        ids: list[str] = []
+        for d in deals:
+            if not isinstance(d, dict):
+                continue
+            did = d.get("id") or d.get("_id")
+            if not did:
+                item = d.get("item") or d.get("uniqueName") or d.get("itemType") or ""
+                price = d.get("salePrice") or d.get("originalPrice") or ""
+                exp = d.get("expiry") or ""
+                did = f"{item}|{price}|{exp}"
+            ids.append(str(did))
+        return ids
+
+    def _arbitration_ids_for_topic(self, ws: dict) -> list[str]:
+        arb = ws.get("arbitration")
+        if not isinstance(arb, dict):
+            return []
+        aid = arb.get("id") or arb.get("_id")
+        if not aid:
+            node = arb.get("node") or arb.get("location") or arb.get("nodeName") or arb.get("nodeKey") or ""
+            mtype = arb.get("type") or arb.get("missionType") or ""
+            exp = arb.get("expiry") or arb.get("endTime") or ""
+            aid = f"{node}|{mtype}|{exp}"
+        return [str(aid)] if aid else []
+
+    def _void_trader_ids_for_topic(self, ws: dict) -> list[str]:
+        vt = ws.get("voidTrader")
+        if not isinstance(vt, dict):
+            return []
+        ids: list[str] = []
+        base = vt.get("active")
+        loc = vt.get("location") or ""
+        exp = vt.get("expiry") or vt.get("endTime") or ""
+        if base is not None or loc or exp:
+            ids.append(f"status={base}|loc={loc}|exp={exp}")
+        inv = vt.get("inventory")
+        if not isinstance(inv, list):
+            inv = vt.get("manifest") if isinstance(vt.get("manifest"), list) else []
+        for it in inv:
+            if not isinstance(it, dict):
+                continue
+            name = it.get("item") or it.get("name") or it.get("uniqueName") or it.get("itemName") or it.get("itemType")
+            ducats = it.get("ducats") or it.get("ducatCost") or it.get("dukat")
+            credits = it.get("credits") or it.get("creditCost") or it.get("cost")
+            if not name:
+                continue
+            ids.append(f"{name}|{ducats}|{credits}")
+        return ids
+
+    def _steel_path_ids_for_topic(self, ws: dict) -> list[str]:
+        sp = ws.get("steelPathOffering") or ws.get("steelPath")
+        if not isinstance(sp, dict):
+            return []
+        ids: list[str] = []
+        exp = sp.get("expiry") or sp.get("endTime") or ""
+        current = sp.get("currentReward")
+        if isinstance(current, dict):
+            name = current.get("name") or current.get("item") or current.get("uniqueName")
+            cost = current.get("cost")
+            if name:
+                ids.append(f"cur:{name}|{cost}|{exp}")
+        elif isinstance(current, str) and current:
+            ids.append(f"cur:{current}|{exp}")
+        next_reward = sp.get("nextReward")
+        if isinstance(next_reward, dict):
+            name = next_reward.get("name") or next_reward.get("item") or next_reward.get("uniqueName")
+            cost = next_reward.get("cost")
+            if name:
+                ids.append(f"next:{name}|{cost}|{exp}")
+        elif isinstance(next_reward, str) and next_reward:
+            ids.append(f"next:{next_reward}|{exp}")
+        rotation = sp.get("rotation")
+        if isinstance(rotation, list):
+            for it in rotation:
+                if not isinstance(it, dict):
+                    continue
+                name = it.get("name") or it.get("item") or it.get("uniqueName")
+                cost = it.get("cost")
+                if name:
+                    ids.append(f"rot:{name}|{cost}")
+        return ids
+
+    def _topic_ids_for_topic(self, topic: str, ws: dict) -> list[str] | None:
+        base, _ = self._parse_topic_id(topic)
+        if base == "fissures":
+            return self._fissure_ids_for_topic(topic, ws)
+        if base == "alerts":
+            return self._alert_ids_for_topic(ws)
+        if base == "invasions":
+            return self._invasion_ids_for_topic(ws)
+        if base == "daily_deals":
+            return self._daily_deal_ids_for_topic(ws)
+        if base == "arbitration":
+            return self._arbitration_ids_for_topic(ws)
+        if base == "void_trader":
+            return self._void_trader_ids_for_topic(ws)
+        if base == "steel_path":
+            return self._steel_path_ids_for_topic(ws)
+        return None
+
+    def _collect_fissure_ids(self, ws: dict, *, kind: str, tier: str | None, mission: str | None) -> list[str]:
+        fiss = ws.get("voidStorms" if kind == "storm" else "activeMissions", [])
+        if not isinstance(fiss, list):
+            return []
+        ids: list[str] = []
+        for m in fiss:
+            if not isinstance(m, dict):
+                continue
+            hard = m.get("hard")
+            if kind == "steel" and hard is not True:
+                continue
+            if kind == "normal" and hard is True:
+                continue
+            if tier:
+                t_code = m.get("modifier") or m.get("tier") or ""
+                t_key = self._tier_key_from_code(t_code)
+                if not t_key or t_key != tier.lower():
+                    continue
+            if mission:
+                mt_code = m.get("missionType") or m.get("MissionType") or ""
+                mt_key = self._mission_key_from_code(mt_code)
+                if not mt_key or mt_key != mission.lower():
+                    continue
+            fid = m.get("id") or m.get("_id")
+            if not fid:
+                node = m.get("node") or m.get("location") or ""
+                tier_code = m.get("modifier") or m.get("tier") or ""
+                mt_code = m.get("missionType") or m.get("MissionType") or ""
+                exp = m.get("expiry") or m.get("endTime") or ""
+                fid = f"{node}|{tier_code}|{mt_code}|{exp}"
+            ids.append(str(fid))
+        return ids
+
     def _topic_sig(self, topic: str, ws: dict) -> str:
         def h(obj) -> str:
             raw = json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -1342,7 +1887,15 @@ class WarframeDatasourcePlugin(Star):
             v = ws.get("voidTrader")
             if not isinstance(v, dict):
                 return h({})
-            return h({"active": v.get("active"), "loc": v.get("location"), "exp": v.get("expiry")})
+            inv = v.get("inventory") or v.get("manifest") or []
+            rows = []
+            if isinstance(inv, list):
+                for it in inv:
+                    if not isinstance(it, dict):
+                        continue
+                    name = it.get("item") or it.get("name") or it.get("uniqueName") or it.get("ItemType")
+                    rows.append({"name": name, "ducats": it.get("ducats"), "credits": it.get("credits")})
+            return h({"active": v.get("active"), "loc": v.get("location"), "exp": v.get("expiry"), "items": rows})
 
         if base == "daily_deals":
             deals = g(ws, "dailyDeals", default=[])
@@ -1391,7 +1944,14 @@ class WarframeDatasourcePlugin(Star):
             sp = ws.get("steelPath") or ws.get("steelPathOffering")
             if not isinstance(sp, dict):
                 return h({})
-            return h({"rot": sp.get("rotation") or sp.get("name"), "exp": sp.get("expiry")})
+            return h(
+                {
+                    "rot": sp.get("rotation") or sp.get("name"),
+                    "cur": sp.get("currentReward"),
+                    "next": sp.get("nextReward"),
+                    "exp": sp.get("expiry"),
+                }
+            )
 
         if base == "cycles":
             zone = (filters.get("zone") or "").lower()
@@ -1460,13 +2020,28 @@ class WarframeDatasourcePlugin(Star):
         if not all_topics:
             return
 
+        need_extras = False
+        for t in all_topics:
+            base, _ = self._parse_topic_id(t)
+            if base in {"arbitration", "steel_path", "void_trader", "sortie", "archon"}:
+                need_extras = True
+                break
+        if need_extras:
+            ws2 = await self._merge_extras_ws(ws2)
+
         topic_payload: dict[str, tuple[str, str, str]] = {}
+        topic_ids: dict[str, list[str]] = {}
         for t in sorted(all_topics):
             title, text = await self._topic_text(t, ws2)
             sig = self._topic_sig(t, ws2)
             topic_payload[t] = (title, text, sig)
+            if self._notify_mode_for_topic(t) == "new_only":
+                ids = self._topic_ids_for_topic(t, ws2)
+                if ids is not None:
+                    topic_ids[t] = ids
 
-        to_send: list[tuple[str, str | None, str | None, str | None, str, str, str, str | None]] = []
+        to_send: list[tuple[str, str | None, str | None, str | None, str, str, str, str | None, list[str] | None]] = []
+        pending_ids_updates: list[tuple[str, str | None, str, list[str]]] = []
         for it in items:
             if not isinstance(it, dict):
                 continue
@@ -1488,28 +2063,45 @@ class WarframeDatasourcePlugin(Star):
                     continue
                 if not self._topic_should_notify(t, ws2):
                     continue
-                last_sig = meta.get("last_sig")
                 title, text, sig = topic_payload[t]
+                ids = topic_ids.get(t) if self._notify_mode_for_topic(t) == "new_only" else None
+                if ids is not None:
+                    last_ids = meta.get("last_ids")
+                    if not isinstance(last_ids, list):
+                        if ids:
+                            pending_ids_updates.append((umo, uid, t, ids))
+                        continue
+                    last_set = set(last_ids)
+                    new_ids = [fid for fid in ids if fid not in last_set]
+                    if not new_ids:
+                        if set(ids) != last_set:
+                            pending_ids_updates.append((umo, uid, t, ids))
+                        continue
+                    to_send.append((umo, platform, uid, group_id, t, title, text, sig, ids))
+                    continue
+                last_sig = meta.get("last_sig")
                 if last_sig != sig:
-                    to_send.append((umo, platform, uid, group_id, t, title, text, sig))
+                    to_send.append((umo, platform, uid, group_id, t, title, text, sig, None))
 
-        if not to_send:
+        if not to_send and not pending_ids_updates:
             return
 
-        sent: list[tuple[str, str | None, str, str]] = []
-        for umo, platform, uid, group_id, topic, title, text, sig in to_send:
+        sent: list[tuple[str, str | None, str, str | None, list[str] | None]] = []
+        for umo, platform, uid, group_id, topic, title, text, sig, ids in to_send:
             ok = await self._push_to_subscriber(umo, platform=platform, user_id=uid, group_id=group_id, title=title, text=text)
             if ok:
-                sent.append((umo, uid, topic, sig))
-
-        if not sent:
-            return
+                sent.append((umo, uid, topic, sig, ids))
 
         async with self._sub_lock:
             data2 = await self._sub_store.load()
             changed = False
-            for umo, uid, topic, sig in sent:
-                changed = self._sub_store.set_last_sig(data2, umo=umo, uid=uid, topic=topic, sig=sig) or changed
+            for umo, uid, topic, sig, ids in sent:
+                if sig is not None:
+                    changed = self._sub_store.set_last_sig(data2, umo=umo, uid=uid, topic=topic, sig=sig) or changed
+                if ids is not None:
+                    changed = self._sub_store.set_last_ids(data2, umo=umo, uid=uid, topic=topic, ids=ids) or changed
+            for umo, uid, topic, ids in pending_ids_updates:
+                changed = self._sub_store.set_last_ids(data2, umo=umo, uid=uid, topic=topic, ids=ids) or changed
             if changed:
                 await self._sub_store.save(data2)
 
@@ -1591,6 +2183,7 @@ class WarframeDatasourcePlugin(Star):
             "- /wf 管理 推送 开|关|状态\n"
             "- /wf 管理 清理图片缓存\n"
             "- /wf 管理 删除订阅 全部|本群|<QQ>\n"
+            "- /wf 管理 订阅 <QQ> <项目> [过滤]\n"
             f"image_mode={self.img_cfg.enabled} cache_images={self.img_cfg.cache_images}"
         )
         async for r in self._send_text_or_image(event, title="/wf 帮助", text=msg):
@@ -1709,12 +2302,11 @@ class WarframeDatasourcePlugin(Star):
 
     @wf_group.command("奸商", alias={"void", "baro", "虚空商人"})
     async def wf_void(self, event: AstrMessageEvent):
-        ws = await self._ensure_worldstate()
-        if ws is None:
-            yield event.plain_result("worldstate unavailable, use /wf 更新")
-            return
+        ws = await self._ensure_worldstate() or {}
+        ws = await self._merge_extras_ws(ws)
         nodes = await self._build_nodes_map()
-        msg = format_void_trader(ws, nodes_map=nodes)
+        items_map = await self._build_item_translation_map()
+        msg = format_void_trader(ws, nodes_map=nodes, items_map=items_map)
         async for r in self._send_text_or_image(event, title="奸商", text=msg):
             yield r
 
@@ -1724,7 +2316,8 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
-        msg = format_daily_deals(ws)
+        items_map = await self._build_item_translation_map()
+        msg = format_daily_deals(ws, items_map=items_map)
         async for r in self._send_text_or_image(event, title="每日特惠", text=msg):
             yield r
 
@@ -1734,6 +2327,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
+        ws = await self._merge_extras_ws(ws)
         nodes = await self._build_nodes_map()
         msg = format_sortie(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="突击", text=msg):
@@ -1745,6 +2339,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
+        ws = await self._merge_extras_ws(ws)
         nodes = await self._build_nodes_map()
         msg = format_archon_hunt(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="执刑官猎杀", text=msg):
@@ -1752,10 +2347,8 @@ class WarframeDatasourcePlugin(Star):
 
     @wf_group.command("仲裁", alias={"arbitration"})
     async def wf_arbitration(self, event: AstrMessageEvent):
-        ws = await self._ensure_worldstate()
-        if ws is None:
-            yield event.plain_result("worldstate unavailable, use /wf 更新")
-            return
+        ws = await self._ensure_worldstate() or {}
+        ws = await self._merge_extras_ws(ws)
         nodes = await self._build_nodes_map()
         msg = format_arbitration(ws, nodes_map=nodes)
         async for r in self._send_text_or_image(event, title="仲裁", text=msg):
@@ -1763,10 +2356,8 @@ class WarframeDatasourcePlugin(Star):
 
     @wf_group.command("钢铁奖励", alias={"steel_path", "steelpath", "steelreward"})
     async def wf_steel_path(self, event: AstrMessageEvent):
-        ws = await self._ensure_worldstate()
-        if ws is None:
-            yield event.plain_result("worldstate unavailable, use /wf 更新")
-            return
+        ws = await self._ensure_worldstate() or {}
+        ws = await self._merge_extras_ws(ws)
         msg = format_steel_path(ws)
         async for r in self._send_text_or_image(event, title="钢铁奖励", text=msg):
             yield r
@@ -1805,91 +2396,110 @@ class WarframeDatasourcePlugin(Star):
 
     @wf_group.command("订阅", alias={"subscribe", "关注"})
     async def wf_subscribe(self, event: AstrMessageEvent, topic: str = "", filter1: str = "", filter2: str = "", filter3: str = ""):
-        self._maybe_start_background()
-        umo = event.unified_msg_origin
-        uid = str(event.get_sender_id())
-        uname = event.get_sender_name()
-        platform_name = None
-        group_id = None
-        get_platform_name = getattr(event, "get_platform_name", None)
-        if callable(get_platform_name):
-            try:
-                platform_name = str(get_platform_name())
-            except Exception:
-                platform_name = None
-        get_group_id = getattr(event, "get_group_id", None)
-        if callable(get_group_id):
-            try:
-                gid = get_group_id()
-                if gid is not None:
-                    group_id = str(gid)
-            except Exception:
-                group_id = None
+        try:
+            self._maybe_start_background()
+            if not self._subscribe_enabled and not self._is_admin(event):
+                yield event.plain_result("订阅功能已暂时关闭，请联系管理员")
+                return
+            umo = event.unified_msg_origin
+            uid = str(event.get_sender_id())
+            uname = event.get_sender_name()
+            if uname is not None and not isinstance(uname, str):
+                uname = str(uname)
+            platform_name = None
+            group_id = None
+            get_platform_name = getattr(event, "get_platform_name", None)
+            if callable(get_platform_name):
+                try:
+                    platform_name = str(get_platform_name())
+                except Exception:
+                    platform_name = None
+            get_group_id = getattr(event, "get_group_id", None)
+            if callable(get_group_id):
+                try:
+                    gid = get_group_id()
+                    if gid is not None:
+                        group_id = str(gid)
+                except Exception:
+                    group_id = None
 
-        if not topic.strip():
+            if not topic.strip():
+                async with self._sub_lock:
+                    data = await self._sub_store.load()
+                    entries = self._sub_store.list_entries(data)
+                cur = next((e for e in entries if e.unified_msg_origin == umo and e.user_id == uid), None)
+                legacy = next((e for e in entries if e.unified_msg_origin == umo and e.user_id is None), None)
+                cur_topics = sorted(list(cur.topics.keys())) if cur else []
+                legacy_topics = sorted(list(legacy.topics.keys())) if legacy else []
+                lines = [
+                    "用法：/wf 订阅 <项目> [过滤]",
+                    "可选项目：警报 / 入侵 / 裂隙(裂缝) / 奸商 / 每日特惠 / 突击 / 执刑官猎杀 / 仲裁 / 钢铁奖励 / 平原(循环) / 轮换 / 电波",
+                    "裂缝过滤示例：",
+                    "- /wf 订阅 裂缝 钢铁 防御",
+                    "- /wf 订阅 裂缝 九重天",
+                    "- /wf 订阅 裂缝 古纪 捕获",
+                    "平原过滤示例：",
+                    "- /wf 订阅 夜灵平原 夜晚",
+                    "- /wf 订阅 平原 夜晚",
+                    "- /wf 订阅 夜灵平原 夜晚 10  (提前10分钟预提醒)",
+                    "取消订阅：",
+                    "- /wf 取消订阅 <项目>  (同样支持过滤，如：/wf 取消订阅 裂缝 钢铁 防御)",
+                    "- /wf 取消订阅 全部（仅清除本人订阅）",
+                    "查看列表：/wf 订阅列表",
+                    f"当前用户订阅：{', '.join([self._topic_label(t) for t in cur_topics]) or '-'}",
+                ]
+                if legacy_topics:
+                    lines.append(f"旧版(仅会话)订阅：{', '.join([self._topic_label(t) for t in legacy_topics])}")
+                msg = "\n".join(lines)
+                async for r in self._send_text_or_image(event, title="订阅", text=msg):
+                    yield r
+                return
+
+            t = self._normalize_sub_topic_args(topic, filter1, filter2, filter3)
+            if t is None:
+                yield event.plain_result("未知订阅项，先用 /wf 订阅 查看可选项目")
+                return
+
+            ws = await self._ensure_worldstate()
+            title = self._topic_label(t)
+            text = ""
+            sig: str | None = None
+            topic_ids: list[str] | None = None
+            if ws is not None:
+                title, text = await self._topic_text(t, ws)
+                sig = self._topic_sig(t, ws)
+                if self._notify_mode_for_topic(t) == "new_only":
+                    topic_ids = self._topic_ids_for_topic(t, ws)
+
             async with self._sub_lock:
                 data = await self._sub_store.load()
-                entries = self._sub_store.list_entries(data)
-            cur = next((e for e in entries if e.unified_msg_origin == umo and e.user_id == uid), None)
-            legacy = next((e for e in entries if e.unified_msg_origin == umo and e.user_id is None), None)
-            cur_topics = sorted(list(cur.topics.keys())) if cur else []
-            legacy_topics = sorted(list(legacy.topics.keys())) if legacy else []
-            lines = [
-                "用法：/wf 订阅 <项目> [过滤]",
-                "可选项目：警报 / 入侵 / 裂隙(裂缝) / 奸商 / 每日特惠 / 突击 / 执刑官猎杀 / 仲裁 / 钢铁奖励 / 平原(循环) / 轮换 / 电波",
-                "裂缝过滤示例：",
-                "- /wf 订阅 裂缝 钢铁 防御",
-                "- /wf 订阅 裂缝 九重天",
-                "- /wf 订阅 裂缝 古纪 捕获",
-                "平原过滤示例：",
-                "- /wf 订阅 夜灵平原 夜晚",
-                "- /wf 订阅 平原 夜晚",
-                "- /wf 订阅 夜灵平原 夜晚 10  (提前10分钟预提醒)",
-                "取消订阅：",
-                "- /wf 取消订阅 <项目>  (同样支持过滤，如：/wf 取消订阅 裂缝 钢铁 防御)",
-                "- /wf 取消订阅 全部（仅清除本人订阅）",
-                "查看列表：/wf 订阅列表",
-                f"当前用户订阅：{', '.join([self._topic_label(t) for t in cur_topics]) or '-'}",
-            ]
-            if legacy_topics:
-                lines.append(f"旧版(仅会话)订阅：{', '.join([self._topic_label(t) for t in legacy_topics])}")
-            msg = "\n".join(lines)
-            async for r in self._send_text_or_image(event, title="订阅", text=msg):
-                yield r
-            return
-
-        t = self._normalize_sub_topic_args(topic, filter1, filter2, filter3)
-        if t is None:
-            yield event.plain_result("未知订阅项，先用 /wf 订阅 查看可选项目")
-            return
-
-        ws = await self._ensure_worldstate()
-        title = self._topic_label(t)
-        text = ""
-        sig: str | None = None
-        if ws is not None:
-            title, text = await self._topic_text(t, ws)
-            sig = self._topic_sig(t, ws)
-
-        async with self._sub_lock:
-            data = await self._sub_store.load()
-            added = self._sub_store.upsert_topic(
-                data, umo=umo, uid=uid, topic=t, user_name=uname, platform=platform_name, group_id=group_id
-            )
+                added = self._sub_store.upsert_topic(
+                    data, umo=umo, uid=uid, topic=t, user_name=uname, platform=platform_name, group_id=group_id
+                )
             if sig is not None:
                 self._sub_store.set_last_sig(data, umo=umo, uid=uid, topic=t, sig=sig)
+            if topic_ids is not None:
+                self._sub_store.set_last_ids(data, umo=umo, uid=uid, topic=t, ids=topic_ids)
             await self._sub_store.save(data)
 
-        if added:
-            yield event.plain_result(f"已订阅：{title}")
-        else:
-            yield event.plain_result(f"已在订阅列表：{title}")
+            if added:
+                yield event.plain_result(f"已订阅：{title}")
+            else:
+                yield event.plain_result(f"已在订阅列表：{title}")
 
-        if ws is not None and text:
-            async for r in self._send_text_or_image(event, title=title, text=text):
-                yield r
-        else:
-            yield event.plain_result("worldstate unavailable, use /wf 更新")
+            if ws is not None and text:
+                async for r in self._send_text_or_image(event, title=title, text=text):
+                    yield r
+            else:
+                yield event.plain_result("worldstate unavailable, use /wf 更新")
+        except Exception:
+            logger.exception("wf_subscribe failed")
+            yield event.plain_result("订阅处理失败，请查看控制台日志")
+
+    @afilter.command("wf订阅", alias={"wfsub", "订阅wf"})
+    async def wf_subscribe_flat(self, event: AstrMessageEvent, topic: str = "", filter1: str = "", filter2: str = "", filter3: str = ""):
+        async for r in self.wf_subscribe(event, topic, filter1, filter2, filter3):
+            yield r
 
     @wf_group.command("取消订阅", alias={"unsubscribe", "退订"})
     async def wf_unsubscribe(self, event: AstrMessageEvent, topic: str = "全部", filter1: str = "", filter2: str = "", filter3: str = ""):
@@ -2028,13 +2638,25 @@ class WarframeDatasourcePlugin(Star):
             yield event.plain_result("当前为私聊或未记录群号，@ 不会生效；请在群内重新订阅以记录群号")
 
     @wf_group.command("管理", alias={"admin", "管理员"})
-    async def wf_admin(self, event: AstrMessageEvent, action: str = "", arg1: str = "", arg2: str = ""):
+    async def wf_admin(
+        self,
+        event: AstrMessageEvent,
+        action: str = "",
+        arg1: str = "",
+        arg2: str = "",
+        arg3: str = "",
+        arg4: str = "",
+        arg5: str = "",
+    ):
         if not self._is_admin(event):
             yield event.plain_result("仅管理员可用")
             return
         a0 = (action or "").strip()
         a1 = (arg1 or "").strip()
         a2 = (arg2 or "").strip()
+        a3 = (arg3 or "").strip()
+        a4 = (arg4 or "").strip()
+        a5 = (arg5 or "").strip()
 
         if a0 in {"推送", "push"}:
             if a1 in {"开", "开启", "on", "enable", "启用"}:
@@ -2061,6 +2683,33 @@ class WarframeDatasourcePlugin(Star):
                 yield event.plain_result(f"推送状态：{'开启' if self._push_enabled else '关闭'}")
                 return
             yield event.plain_result("用法：/wf 管理 推送 开|关|状态")
+            return
+
+        if a0 in {"订阅开关", "订阅功能", "订阅权限", "subscribe_switch", "sub_switch"}:
+            if a1 in {"开", "开启", "on", "enable", "启用"}:
+                self._subscribe_enabled = True
+                setter = getattr(self, "put_kv_data", None)
+                if callable(setter):
+                    try:
+                        await setter("wf_subscribe_enabled", True)
+                    except Exception:
+                        logger.debug("save kv wf_subscribe_enabled failed", exc_info=True)
+                yield event.plain_result("已开启订阅功能")
+                return
+            if a1 in {"关", "关闭", "off", "disable", "停用"}:
+                self._subscribe_enabled = False
+                setter = getattr(self, "put_kv_data", None)
+                if callable(setter):
+                    try:
+                        await setter("wf_subscribe_enabled", False)
+                    except Exception:
+                        logger.debug("save kv wf_subscribe_enabled failed", exc_info=True)
+                yield event.plain_result("已关闭订阅功能")
+                return
+            if a1 in {"状态", "status", ""}:
+                yield event.plain_result(f"订阅功能：{'开启' if self._subscribe_enabled else '关闭'}")
+                return
+            yield event.plain_result("用法：/wf 管理 订阅开关 开|关|状态")
             return
 
         if a0 in {"清理图片缓存", "清理缓存", "清图", "clear_images"}:
@@ -2099,9 +2748,78 @@ class WarframeDatasourcePlugin(Star):
             yield event.plain_result(f"已删除订阅：{removed} 条")
             return
 
+        if a0 in {"订阅", "添加订阅", "订阅用户", "add_sub", "subscribe"}:
+            target_uid = a1
+            if not target_uid or not target_uid.isdigit():
+                # 尝试从原始消息里抓取 @QQ
+                raw = getattr(event, "message_str", "") or ""
+                m = re.search(r"(\d{5,})", raw)
+                if m:
+                    target_uid = m.group(1)
+            if not target_uid or not target_uid.isdigit():
+                yield event.plain_result("用法：/wf 管理 订阅 <QQ> <项目> [过滤]")
+                return
+            topic = a2
+            if not topic:
+                yield event.plain_result("用法：/wf 管理 订阅 <QQ> <项目> [过滤]")
+                return
+
+            t = self._normalize_sub_topic_args(topic, a3, a4, a5)
+            if t is None:
+                yield event.plain_result("未知订阅项，先用 /wf 订阅 查看可选项目")
+                return
+
+            platform_name = None
+            group_id = None
+            get_platform_name = getattr(event, "get_platform_name", None)
+            if callable(get_platform_name):
+                try:
+                    platform_name = str(get_platform_name())
+                except Exception:
+                    platform_name = None
+            get_group_id = getattr(event, "get_group_id", None)
+            if callable(get_group_id):
+                try:
+                    gid = get_group_id()
+                    if gid is not None:
+                        group_id = str(gid)
+                except Exception:
+                    group_id = None
+
+            ws = await self._ensure_worldstate()
+            title = self._topic_label(t)
+            text = ""
+            sig: str | None = None
+            if ws is not None:
+                title, text = await self._topic_text(t, ws)
+                sig = self._topic_sig(t, ws)
+
+            async with self._sub_lock:
+                data = await self._sub_store.load()
+                added = self._sub_store.upsert_topic(
+                    data,
+                    umo=event.unified_msg_origin,
+                    uid=str(target_uid),
+                    topic=t,
+                    user_name=None,
+                    platform=platform_name,
+                    group_id=group_id,
+                )
+                if sig is not None:
+                    self._sub_store.set_last_sig(data, umo=event.unified_msg_origin, uid=str(target_uid), topic=t, sig=sig)
+                await self._sub_store.save(data)
+
+            if added:
+                yield event.plain_result(f"已为 {target_uid} 订阅：{title}")
+            else:
+                yield event.plain_result(f"{target_uid} 已在订阅列表：{title}")
+            return
+
         yield event.plain_result(
             "管理员命令：\n"
             "- /wf 管理 推送 开|关|状态\n"
+            "- /wf 管理 订阅开关 开|关|状态\n"
             "- /wf 管理 清理图片缓存\n"
             "- /wf 管理 删除订阅 全部|本群|<QQ>"
+            "\n- /wf 管理 订阅 <QQ> <项目> [过滤]"
         )

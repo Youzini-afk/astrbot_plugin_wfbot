@@ -92,12 +92,16 @@ def _normalize_official_worldstate(ws: dict[str, Any]) -> dict[str, Any]:
         completion = None
         if isinstance(goal, (int, float)) and isinstance(count, (int, float)) and goal:
             completion = float(goal - count) / float(goal)
+        attacking = i.get("AttackingFaction") or i.get("attackingFaction") or i.get("AttackerFaction") or i.get("attackerFaction")
+        defending = i.get("DefendingFaction") or i.get("defendingFaction") or i.get("DefenderFaction") or i.get("defenderFaction")
         return {
             "id": i.get("id") or i.get("_id"),
             "node": i.get("node") or i.get("Node"),
             "completed": i.get("completed") if "completed" in i else i.get("Completed"),
             "completion": i.get("completion") if "completion" in i else completion,
             "expiry": _unwrap_date(i.get("Expiry")),
+            "attackingFaction": attacking,
+            "defendingFaction": defending,
         }
 
     def norm_sortie(s: Any) -> Any:
@@ -146,10 +150,56 @@ def _normalize_official_worldstate(ws: dict[str, Any]) -> dict[str, Any]:
     vts = ws.get("VoidTraders")
     vt_obj = vts[0] if isinstance(vts, list) and vts else None
     if isinstance(vt_obj, dict):
+        manifest_raw = vt_obj.get("Manifest") or vt_obj.get("manifest")
+        manifest: list[dict] = []
+        if isinstance(manifest_raw, list):
+            for it in manifest_raw:
+                if not isinstance(it, dict):
+                    continue
+                manifest.append(
+                    {
+                        "uniqueName": it.get("ItemType") or it.get("itemType") or it.get("uniqueName"),
+                        "ducats": it.get("PrimePrice") or it.get("ducats"),
+                        "credits": it.get("RegularPrice") or it.get("credits"),
+                        "item": it.get("Item") or it.get("item"),
+                    }
+                )
         out["voidTrader"] = {
             "location": vt_obj.get("Node"),
             "expiry": _unwrap_date(vt_obj.get("Expiry")),
             "activation": _unwrap_date(vt_obj.get("Activation")),
+            "character": vt_obj.get("Character") or vt_obj.get("character"),
+            "manifest": manifest,
+        }
+
+    arbitration = ws.get("Arbitration") or ws.get("Arbitrations")
+    if isinstance(arbitration, list) and arbitration:
+        arbitration = arbitration[0]
+    if isinstance(arbitration, dict):
+        out["arbitration"] = {
+            "node": arbitration.get("Node") or arbitration.get("node"),
+            "type": arbitration.get("Type") or arbitration.get("type") or arbitration.get("MissionType"),
+            "expiry": _unwrap_date(arbitration.get("Expiry") or arbitration.get("expiry")),
+            "activation": _unwrap_date(arbitration.get("Activation") or arbitration.get("activation")),
+        }
+
+    steel_path = ws.get("SteelPath") or ws.get("SteelPathOffering") or ws.get("SteelPathOfferings")
+    if isinstance(steel_path, list) and steel_path:
+        steel_path = steel_path[0]
+    if isinstance(steel_path, dict):
+        rotation = steel_path.get("Rotation") or steel_path.get("rotation") or steel_path.get("Items") or steel_path.get("items")
+        norm_rotation: list[dict] | None = None
+        if isinstance(rotation, list):
+            norm_rotation = []
+            for it in rotation:
+                if not isinstance(it, dict):
+                    continue
+                name = it.get("name") or it.get("Name") or it.get("item") or it.get("Item")
+                cost = it.get("cost") or it.get("Cost") or it.get("price") or it.get("Price")
+                norm_rotation.append({"name": name, "cost": cost})
+        out["steelPathOffering"] = {
+            "expiry": _unwrap_date(steel_path.get("Expiry") or steel_path.get("expiry")),
+            "rotation": norm_rotation if norm_rotation is not None else rotation,
         }
 
     dds = ws.get("DailyDeals")
