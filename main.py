@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import re
@@ -41,7 +42,6 @@ from .wf_i18n import to_simplified_zh
 PLUGIN_ID = "astrbot_plugin_wfbot"
 
 
-@register("astrbot_plugin_wfbot", "Youzini", "Warframe 数据层（世界状态/PublicExport/多镜像/market），支持缓存、清理与定时刷新", "0.1.0")
 class WarframeDatasourcePlugin(Star):
     @staticmethod
     def _parse_admin_mapping(raw, *, key_field: str) -> dict[str, list[str]]:
@@ -90,92 +90,24 @@ class WarframeDatasourcePlugin(Star):
 
         data_dir = self._resolve_plugin_data_dir() / "warframe"
 
-        refresh_cfg = self.config.get("refresh", {})
-        if not isinstance(refresh_cfg, dict):
-            refresh_cfg = {}
+        refresh_cfg = self._get_cfg_section("refresh")
+        retention_cfg = self._get_cfg_section("retention")
+        render_cfg = self._get_cfg_section("render")
+        subs_cfg = self._get_cfg_section("subscriptions")
+        http_cfg = self._get_cfg_section("http")
+        admin_cfg = self._get_cfg_section("admin")
+        i18n_cfg = self._get_cfg_section("i18n")
 
-        retention_cfg = self.config.get("retention", {})
-        if not isinstance(retention_cfg, dict):
-            retention_cfg = {}
-
-        render_cfg = self.config.get("render", {})
-        if not isinstance(render_cfg, dict):
-            render_cfg = {}
-
-        subs_cfg = self.config.get("subscriptions", {})
-        if not isinstance(subs_cfg, dict):
-            subs_cfg = {}
-
-        http_cfg = self.config.get("http", {})
-        if not isinstance(http_cfg, dict):
-            http_cfg = {}
-
-        admin_cfg = self.config.get("admin", {})
-        if not isinstance(admin_cfg, dict):
-            admin_cfg = {}
-
-        i18n_cfg = self.config.get("i18n", {})
-        if not isinstance(i18n_cfg, dict):
-            i18n_cfg = {}
-
-        max_req_time = http_cfg.get("max_request_time_seconds", 30)
-        try:
-            max_req_time_f: float | None = float(max_req_time)
-            if max_req_time_f <= 0:
-                max_req_time_f = None
-        except Exception:
-            max_req_time_f = 30.0
-
-        no_proxy_suffixes_raw = http_cfg.get("no_proxy_suffixes", ["warframe.com"])
-        if isinstance(no_proxy_suffixes_raw, list):
-            no_proxy_suffixes = tuple(str(x).strip() for x in no_proxy_suffixes_raw if str(x).strip())
-        else:
-            no_proxy_suffixes = ("warframe.com",)
-        proxy_url = str(http_cfg.get("proxy_url", "")).strip()
-        if not proxy_url:
-            proxy_url = None
-
-        wf_cfg = WarframeConfig(
-            data_dir=data_dir,
-            public_export_language=str(self.config.get("public_export_language", "zh")),
-            worldstate_refresh_interval=float(refresh_cfg.get("worldstate", self.config.get("worldstate_refresh_interval", 600))),
-            public_export_refresh_interval=float(refresh_cfg.get("public_export", self.config.get("public_export_refresh_interval", 21600))),
-            mirrors_refresh_interval=float(refresh_cfg.get("mirrors", self.config.get("mirrors_refresh_interval", 21600))),
-            market_bootstrap_refresh_interval=float(refresh_cfg.get("market_bootstrap", self.config.get("market_bootstrap_refresh_interval", 86400))),
-            cleanup_retention_days=int(retention_cfg.get("cleanup_days", self.config.get("cleanup_retention_days", 14))),
-            keep_worldstate_snapshots=int(retention_cfg.get("keep_worldstate_snapshots", self.config.get("keep_worldstate_snapshots", 24))),
-            keep_mirror_snapshots=int(retention_cfg.get("keep_mirror_snapshots", self.config.get("keep_mirror_snapshots", 10))),
-            http_max_request_time_seconds=max_req_time_f,
-            http_no_proxy_enabled=bool(http_cfg.get("no_proxy_enabled", True)),
-            http_no_proxy_suffixes=no_proxy_suffixes,
-            http_proxy_url=proxy_url,
-        )
-
-        self.img_cfg = ImageRenderConfig(
-            enabled=bool(render_cfg.get("enabled", self.config.get("image_mode", False))),
-            cache_images=bool(render_cfg.get("cache_images", self.config.get("cache_images", False))),
-            keep_images=int(render_cfg.get("keep_images", self.config.get("keep_image_cache", 10))),
-            width=int(render_cfg.get("width", 1080)),
-            font_size=int(render_cfg.get("font_size", 32)),
-            title_font_size=int(render_cfg.get("title_font_size", 40)),
-            pad=int(render_cfg.get("pad", 28)),
-            line_gap=int(render_cfg.get("line_gap", 10)),
-            font_cjk=(str(render_cfg.get("font_cjk")) if render_cfg.get("font_cjk") else None),
-            font_emoji=(str(render_cfg.get("font_emoji")) if render_cfg.get("font_emoji") else None),
-            emoji_mode=str(render_cfg.get("emoji_mode", "replace") or "replace"),
-        )
+        wf_cfg = self._build_wf_config(data_dir, refresh_cfg, retention_cfg, http_cfg)
+        self.img_cfg = self._build_image_config(render_cfg)
         self.img_dir = data_dir / "images"
 
         self.ds = WarframeDataSource.create(wf_cfg, plugin_id=PLUGIN_ID)
         self.mgr = self.ds.create_manager()
 
-        self._cycles_default_offset_seconds = int(subs_cfg.get("cycles_default_offset_minutes", 0)) * 60
-        self._notify_mode_default = str(subs_cfg.get("notify_mode_default", "change") or "change").lower()
-        notify_modes = subs_cfg.get("notify_modes", {})
-        self._notify_mode_overrides = notify_modes if isinstance(notify_modes, dict) else {}
+        self._init_subscription_config(subs_cfg)
         self._simplify_zh = bool(i18n_cfg.get("simplify_zh", True))
-        self._group_admins = self._parse_admin_mapping(admin_cfg.get("group_admins", {}), key_field="group_id")
-        self._session_admins = self._parse_admin_mapping(admin_cfg.get("session_admins", {}), key_field="session")
+        self._init_admin_config(admin_cfg)
 
         self._sub_lock = asyncio.Lock()
         self._sub_store = SubscriptionStore(data_dir / "subscriptions.json")
@@ -218,6 +150,68 @@ class WarframeDatasourcePlugin(Star):
                     logger.debug("load kv wf_subscribe_enabled failed", exc_info=True)
             self._maybe_start_background()
 
+    def _get_cfg_section(self, key: str) -> dict:
+        val = self.config.get(key, {})
+        return val if isinstance(val, dict) else {}
+
+    def _build_wf_config(self, data_dir: Path, refresh_cfg: dict, retention_cfg: dict, http_cfg: dict) -> WarframeConfig:
+        max_req_time = http_cfg.get("max_request_time_seconds", 30)
+        try:
+            max_req_time_f: float | None = float(max_req_time)
+            if max_req_time_f <= 0:
+                max_req_time_f = None
+        except Exception:
+            max_req_time_f = 30.0
+
+        no_proxy_suffixes_raw = http_cfg.get("no_proxy_suffixes", ["warframe.com"])
+        if isinstance(no_proxy_suffixes_raw, list):
+            no_proxy_suffixes = tuple(str(x).strip() for x in no_proxy_suffixes_raw if str(x).strip())
+        else:
+            no_proxy_suffixes = ("warframe.com",)
+        proxy_url = str(http_cfg.get("proxy_url", "")).strip()
+        if not proxy_url:
+            proxy_url = None
+
+        return WarframeConfig(
+            data_dir=data_dir,
+            public_export_language=str(self.config.get("public_export_language", "zh")),
+            worldstate_refresh_interval=float(refresh_cfg.get("worldstate", self.config.get("worldstate_refresh_interval", 600))),
+            public_export_refresh_interval=float(refresh_cfg.get("public_export", self.config.get("public_export_refresh_interval", 21600))),
+            mirrors_refresh_interval=float(refresh_cfg.get("mirrors", self.config.get("mirrors_refresh_interval", 21600))),
+            market_bootstrap_refresh_interval=float(refresh_cfg.get("market_bootstrap", self.config.get("market_bootstrap_refresh_interval", 86400))),
+            cleanup_retention_days=int(retention_cfg.get("cleanup_days", self.config.get("cleanup_retention_days", 14))),
+            keep_worldstate_snapshots=int(retention_cfg.get("keep_worldstate_snapshots", self.config.get("keep_worldstate_snapshots", 24))),
+            keep_mirror_snapshots=int(retention_cfg.get("keep_mirror_snapshots", self.config.get("keep_mirror_snapshots", 10))),
+            http_max_request_time_seconds=max_req_time_f,
+            http_no_proxy_enabled=bool(http_cfg.get("no_proxy_enabled", True)),
+            http_no_proxy_suffixes=no_proxy_suffixes,
+            http_proxy_url=proxy_url,
+        )
+
+    def _build_image_config(self, render_cfg: dict) -> ImageRenderConfig:
+        return ImageRenderConfig(
+            enabled=bool(render_cfg.get("enabled", self.config.get("image_mode", False))),
+            cache_images=bool(render_cfg.get("cache_images", self.config.get("cache_images", False))),
+            keep_images=int(render_cfg.get("keep_images", self.config.get("keep_image_cache", 10))),
+            width=int(render_cfg.get("width", 1080)),
+            font_size=int(render_cfg.get("font_size", 32)),
+            title_font_size=int(render_cfg.get("title_font_size", 40)),
+            pad=int(render_cfg.get("pad", 28)),
+            line_gap=int(render_cfg.get("line_gap", 10)),
+            font_cjk=(str(render_cfg.get("font_cjk")) if render_cfg.get("font_cjk") else None),
+            font_emoji=(str(render_cfg.get("font_emoji")) if render_cfg.get("font_emoji") else None),
+            emoji_mode=str(render_cfg.get("emoji_mode", "replace") or "replace"),
+        )
+
+    def _init_subscription_config(self, subs_cfg: dict) -> None:
+        self._cycles_default_offset_seconds = int(subs_cfg.get("cycles_default_offset_minutes", 0)) * 60
+        self._notify_mode_default = str(subs_cfg.get("notify_mode_default", "change") or "change").lower()
+        notify_modes = subs_cfg.get("notify_modes", {})
+        self._notify_mode_overrides = notify_modes if isinstance(notify_modes, dict) else {}
+
+    def _init_admin_config(self, admin_cfg: dict) -> None:
+        self._group_admins = self._parse_admin_mapping(admin_cfg.get("group_admins", {}), key_field="group_id")
+        self._session_admins = self._parse_admin_mapping(admin_cfg.get("session_admins", {}), key_field="session")
     def _resolve_plugin_data_dir(self) -> Path:
         # Prefer AstrBot standard tools (review requirement).
         try:
@@ -235,7 +229,7 @@ class WarframeDatasourcePlugin(Star):
             return Path(get_astrbot_data_path()) / "plugin_data" / plugin_name
         except Exception as e:
             logger.debug("get_astrbot_data_path fallback failed: %s", e)
-        # Last resort: use plugin-local folder (best effort).
+        logger.warning("fallback to plugin-local data dir")
         return Path(__file__).resolve().parent / ".plugin_data"
 
     async def _send_text_or_image(self, event: AstrMessageEvent, *, title: str, text: str):
@@ -2029,14 +2023,16 @@ class WarframeDatasourcePlugin(Star):
         if need_extras:
             ws2 = await self._merge_extras_ws(ws2)
 
+        ws_snapshot = copy.deepcopy(ws2)
+
         topic_payload: dict[str, tuple[str, str, str]] = {}
         topic_ids: dict[str, list[str]] = {}
         for t in sorted(all_topics):
-            title, text = await self._topic_text(t, ws2)
-            sig = self._topic_sig(t, ws2)
+            title, text = await self._topic_text(t, ws_snapshot)
+            sig = self._topic_sig(t, ws_snapshot)
             topic_payload[t] = (title, text, sig)
             if self._notify_mode_for_topic(t) == "new_only":
-                ids = self._topic_ids_for_topic(t, ws2)
+                ids = self._topic_ids_for_topic(t, ws_snapshot)
                 if ids is not None:
                     topic_ids[t] = ids
 
@@ -2061,7 +2057,7 @@ class WarframeDatasourcePlugin(Star):
             for t, meta in topics.items():
                 if not isinstance(t, str) or t not in topic_payload or not isinstance(meta, dict):
                     continue
-                if not self._topic_should_notify(t, ws2):
+                if not self._topic_should_notify(t, ws_snapshot):
                     continue
                 title, text, sig = topic_payload[t]
                 ids = topic_ids.get(t) if self._notify_mode_for_topic(t) == "new_only" else None

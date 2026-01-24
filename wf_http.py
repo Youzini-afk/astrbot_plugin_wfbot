@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import aiofiles
+from astrbot.api import logger  # type: ignore
 
 
 @dataclass(frozen=True)
@@ -83,8 +84,7 @@ class HttpClient:
             try:
                 await s.close()
             except Exception:
-                # best-effort close
-                pass
+                logger.debug("http session close failed", exc_info=True)
 
     async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> HttpResponse:
         request_headers: MutableMapping[str, str] = {
@@ -112,6 +112,7 @@ class HttpClient:
                         url=str(resp.url),
                     )
             except (aiohttp.ClientError, asyncio.TimeoutError):
+                logger.debug("http request failed (attempt=%s): %s", attempt, url, exc_info=True)
                 if self._max_request_time_seconds is not None and (time.monotonic() - start_ts) >= self._max_request_time_seconds:
                     raise
                 if attempt > (1 + self._retries):
