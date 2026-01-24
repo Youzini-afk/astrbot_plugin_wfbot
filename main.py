@@ -42,6 +42,38 @@ PLUGIN_ID = "astrbot_plugin_wfbot"
 
 @register("astrbot_plugin_wfbot", "Youzini", "Warframe 数据层（世界状态/PublicExport/多镜像/market），支持缓存、清理与定时刷新", "0.1.0")
 class WarframeDatasourcePlugin(Star):
+    @staticmethod
+    def _parse_admin_mapping(raw, *, key_field: str) -> dict[str, list[str]]:
+        mapping: dict[str, list[str]] = {}
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                key = str(k).strip()
+                if not key:
+                    continue
+                mapping[key] = list(WarframeDatasourcePlugin._normalize_admin_list(v))
+            return mapping
+        if isinstance(raw, list):
+            for it in raw:
+                if not isinstance(it, dict):
+                    continue
+                key = str(it.get(key_field) or "").strip()
+                if not key:
+                    continue
+                admins = it.get("admins") or it.get("users") or it.get("uids")
+                mapping[key] = list(WarframeDatasourcePlugin._normalize_admin_list(admins))
+        return mapping
+
+    @staticmethod
+    def _normalize_admin_list(value) -> set[str]:
+        if value is None:
+            return set()
+        if isinstance(value, list):
+            return {str(v) for v in value if str(v).strip()}
+        if isinstance(value, (str, int)):
+            s = str(value).strip()
+            return {s} if s else set()
+        return set()
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
@@ -125,8 +157,8 @@ class WarframeDatasourcePlugin(Star):
 
         self._cycles_default_offset_seconds = int(subs_cfg.get("cycles_default_offset_minutes", 0)) * 60
         self._simplify_zh = bool(i18n_cfg.get("simplify_zh", True))
-        self._group_admins = admin_cfg.get("group_admins", {}) if isinstance(admin_cfg.get("group_admins", {}), dict) else {}
-        self._session_admins = admin_cfg.get("session_admins", {}) if isinstance(admin_cfg.get("session_admins", {}), dict) else {}
+        self._group_admins = self._parse_admin_mapping(admin_cfg.get("group_admins", {}), key_field="group_id")
+        self._session_admins = self._parse_admin_mapping(admin_cfg.get("session_admins", {}), key_field="session")
 
         self._sub_lock = asyncio.Lock()
         self._sub_store = SubscriptionStore(data_dir / "subscriptions.json")
@@ -310,16 +342,6 @@ class WarframeDatasourcePlugin(Star):
             logger.debug("aiocqhttp at-send failed", exc_info=True)
             return False
 
-    def _normalize_admin_list(self, value) -> set[str]:
-        if value is None:
-            return set()
-        if isinstance(value, list):
-            return {str(v) for v in value if str(v).strip()}
-        if isinstance(value, (str, int)):
-            s = str(value).strip()
-            return {s} if s else set()
-        return set()
-
     def _is_custom_admin(self, event: AstrMessageEvent) -> bool:
         uid = str(event.get_sender_id())
         group_id = None
@@ -333,13 +355,13 @@ class WarframeDatasourcePlugin(Star):
                 group_id = None
 
         if group_id and isinstance(self._group_admins, dict):
-            admins = self._normalize_admin_list(self._group_admins.get(group_id))
+            admins = set(self._group_admins.get(group_id) or [])
             if uid in admins:
                 return True
 
         umo = getattr(event, "unified_msg_origin", None)
         if isinstance(umo, str) and isinstance(self._session_admins, dict):
-            admins = self._normalize_admin_list(self._session_admins.get(umo))
+            admins = set(self._session_admins.get(umo) or [])
             if uid in admins:
                 return True
         return False

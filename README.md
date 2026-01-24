@@ -84,8 +84,9 @@
 - `i18n.simplify_zh`：将繁体中文转换为简体（默认开启，主要用于 solNodes 等第三方数据源）
 - `admin.group_admins`：按群配置管理员（键=群号，值=QQ号列表）
 - `admin.session_admins`：按会话配置管理员（高级，需 unified_msg_origin）
+- 配置为列表格式：`[{ "group_id": "123456", "admins": ["111","222"] }]`
 
-## 存储规范（对齐 AstrBot 官方）
+## 存储规范
 
 - 小型 KV 数据（AstrBot >= 4.9.2）：可用 `put_kv_data/get_kv_data/delete_kv_data`（本插件目前主要使用文件存储）
 - 大文件/缓存：存放在 `data/plugin_data/<插件名>/` 下（本插件会将数据写入 `data/plugin_data/astrbot_plugin_wfbot/warframe/`）
