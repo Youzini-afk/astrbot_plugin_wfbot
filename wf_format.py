@@ -72,6 +72,14 @@ def _g(obj: Any, *path: str, default=None):
     return cur if cur is not None else default
 
 
+def _unavailable_line(title: str, ws: dict | None = None, *, hint: str | None = None) -> str:
+    if not ws:
+        return f"{title}：世界状态不可用，请先 /wf 更新"
+    if hint:
+        return f"{title}：数据源不可用（{hint}）"
+    return f"{title}：数据源不可用"
+
+
 def _ts_iso(ts: Any) -> str:
     if ts is None:
         return "-"
@@ -149,6 +157,44 @@ def mission_emoji(code: Any) -> str:
         "MT_ALCHEMY": "🧪",
         "MT_CORRUPTION": "☣️",
     }.get(code, "")
+
+
+def _coerce_str(val: Any) -> str:
+    if isinstance(val, str):
+        return val
+    if isinstance(val, (int, float)):
+        return str(val)
+    if isinstance(val, dict):
+        for k in ("key", "name", "value", "type", "missionType", "tier", "id"):
+            v = val.get(k)
+            if isinstance(v, str) and v:
+                return v
+    return ""
+
+
+def _infer_railjack_mission_type(node: str) -> str | None:
+    if not isinstance(node, str) or not node:
+        return None
+    s = node.lower()
+    if "orphix" in s:
+        return "Orphix"
+    if "volatile" in s:
+        return "Volatile"
+    if "defense" in s:
+        return "防御"
+    if "assassination" in s:
+        return "刺杀"
+    if "survival" in s:
+        return "生存"
+    if "spy" in s:
+        return "间谍"
+    if "sabotage" in s:
+        return "破坏"
+    if "exterminate" in s:
+        return "歼灭"
+    if "crewbattle" in s or "crewbat" in s:
+        return "Skirmish"
+    return None
 
 
 def _translate_mission_like(val: Any) -> str:
@@ -295,7 +341,7 @@ def _cycle_label(zone: str, state: str) -> tuple[str, str]:
 def format_alerts(ws: dict, nodes_map: dict[str, str] | None = None, limit: int = 8) -> str:
     alerts = _g(ws, "alerts", default=[])
     if not isinstance(alerts, list):
-        return "alerts: -"
+        return _unavailable_line("🚨 警报", ws)
     lines = [f"🚨 警报（{len(alerts)}）"]
     for a in alerts[:limit]:
         if not isinstance(a, dict):
@@ -317,23 +363,37 @@ def format_fissures(ws: dict, nodes_map: dict[str, str] | None = None, *, kind: 
     else:
         fiss = _g(ws, "activeMissions", default=[])
 
+    title = {"normal": "普通", "steel": "钢铁", "storm": "九重天"}.get(kind, kind)
     if not isinstance(fiss, list):
-        return "fissures: -"
+        return _unavailable_line(f"🌀 裂缝·{title}", ws)
 
     if kind == "steel":
         fiss = [m for m in fiss if isinstance(m, dict) and m.get("hard") is True]
     elif kind == "normal":
         fiss = [m for m in fiss if isinstance(m, dict) and (m.get("hard") is False or m.get("hard") is None)]
 
-    title = {"normal": "普通", "steel": "钢铁", "storm": "九重天"}.get(kind, kind)
     lines = [f"🌀 裂缝·{title}（{len(fiss)}）"]
     for m in fiss[:limit]:
-        node = _node_name(str(m.get("node") or m.get("location") or "-"), nodes_map)
-        tier_code = m.get("modifier") or m.get("tier")
-        tier = translate_fissure_tier(tier_code)
-        mtype_code = m.get("missionType") or m.get("MissionType")
-        mtype = translate_mission_type(mtype_code)
-        em = mission_emoji(mtype_code)
+        node_raw = str(m.get("node") or m.get("location") or "-")
+        node = _node_name(node_raw, nodes_map)
+        tier_code = (
+            m.get("modifier")
+            or m.get("tier")
+            or m.get("tierKey")
+            or m.get("tierName")
+            or m.get("ActiveMissionTier")
+            or m.get("activeMissionTier")
+        )
+        tier_s = _coerce_str(tier_code)
+        tier = translate_fissure_tier(tier_s) if tier_s else "-"
+        mtype_code = m.get("missionType") or m.get("MissionType") or m.get("missionTypeKey") or m.get("type")
+        mtype_s = _coerce_str(mtype_code)
+        mtype = translate_mission_type(mtype_s) if mtype_s else "-"
+        if kind == "storm" and (not mtype_s or mtype == "-"):
+            inferred = _infer_railjack_mission_type(node_raw)
+            if inferred:
+                mtype = inferred
+        em = mission_emoji(mtype_s)
         expiry = _ts_iso(m.get("expiry"))
         eta = _fmt_remaining(m.get("expiry"))
         lines.append(f"- {node}｜{em}{mtype}｜{tier}｜⏳{eta}")
@@ -343,7 +403,7 @@ def format_fissures(ws: dict, nodes_map: dict[str, str] | None = None, *, kind: 
 def format_invasions(ws: dict, nodes_map: dict[str, str] | None = None, limit: int = 8) -> str:
     inv = _g(ws, "invasions", default=[])
     if not isinstance(inv, list):
-        return "⚔️ 入侵：-"
+        return _unavailable_line("⚔️ 入侵", ws)
     active = [i for i in inv if isinstance(i, dict) and not i.get("completed")]
     lines = [f"⚔️ 入侵（{len(active)}）"]
     for i in active[:limit]:
@@ -390,7 +450,7 @@ def format_cycles(ws: dict) -> str:
 def format_void_trader(ws: dict, nodes_map: dict[str, str] | None = None, items_map: dict[str, str] | None = None) -> str:
     v = ws.get("voidTrader")
     if not isinstance(v, dict):
-        return "🧳 奸商：-"
+        return _unavailable_line("🧳 奸商", ws)
     active = v.get("active")
     loc = _node_name(str(v.get("location") or "-"), nodes_map)
     exp = v.get("expiry")
@@ -442,7 +502,7 @@ def format_void_trader(ws: dict, nodes_map: dict[str, str] | None = None, items_
 def format_daily_deals(ws: dict, limit: int = 8, items_map: dict[str, str] | None = None) -> str:
     deals = _g(ws, "dailyDeals", default=[])
     if not isinstance(deals, list):
-        return "💰 每日特惠：-"
+        return _unavailable_line("💰 每日特惠", ws)
     lines = [f"💰 每日特惠（{len(deals)}）"]
     for d in deals[:limit]:
         if not isinstance(d, dict):
@@ -471,7 +531,7 @@ def format_daily_deals(ws: dict, limit: int = 8, items_map: dict[str, str] | Non
 def format_sortie(ws: dict, nodes_map: dict[str, str] | None = None) -> str:
     s = ws.get("sortie")
     if not isinstance(s, dict):
-        return "⚔️ 突击：-"
+        return _unavailable_line("⚔️ 突击", ws)
     boss = _translate_boss(s.get("boss") or "-")
     exp = _fmt_remaining(s.get("expiry"))
     lines = [f"⚔️ 突击｜首领 {boss}｜⏳{exp}"]
@@ -491,7 +551,7 @@ def format_archon_hunt(ws: dict, nodes_map: dict[str, str] | None = None) -> str
     # field name varies by worldstate model; try common keys
     hunt = ws.get("archonHunt") or ws.get("liteSortie")
     if not isinstance(hunt, dict):
-        return "🧿 执刑官猎杀：-"
+        return _unavailable_line("🧿 执刑官猎杀", ws)
     boss = _translate_boss(hunt.get("boss") or hunt.get("bossName") or "-")
     exp = _fmt_remaining(hunt.get("expiry"))
     lines = [f"🧿 执刑官猎杀｜首领 {boss}｜⏳{exp}"]
@@ -509,7 +569,7 @@ def format_archon_hunt(ws: dict, nodes_map: dict[str, str] | None = None) -> str
 def format_arbitration(ws: dict, nodes_map: dict[str, str] | None = None) -> str:
     arb = ws.get("arbitration")
     if not isinstance(arb, dict):
-        return "⚖️ 仲裁：-"
+        return _unavailable_line("⚖️ 仲裁", ws, hint="补全源不可用或已关闭")
     raw_node = str(
         arb.get("node")
         or arb.get("location")
@@ -526,14 +586,14 @@ def format_arbitration(ws: dict, nodes_map: dict[str, str] | None = None) -> str
         mtype = "未知"
     exp = _fmt_remaining(arb.get("expiry"))
     if node == "未知地点" and mtype == "未知" and exp == "-":
-        return "⚖️ 仲裁：暂无数据"
+        return _unavailable_line("⚖️ 仲裁", ws, hint="字段缺失")
     return f"⚖️ 仲裁｜{node}｜{mtype}｜⏳{exp}"
 
 
 def format_steel_path(ws: dict) -> str:
     sp = ws.get("steelPath") or ws.get("steelPathOffering")
     if not isinstance(sp, dict):
-        return "🟥 钢铁奖励：-"
+        return _unavailable_line("🟥 钢铁奖励", ws)
     exp = _fmt_remaining(sp.get("expiry"))
     rotation = sp.get("rotation") or sp.get("name") or "-"
     current = sp.get("currentReward")
@@ -571,7 +631,7 @@ def format_steel_path(ws: dict) -> str:
 def format_duviri_cycle(ws: dict) -> str:
     d = ws.get("duviriCycle") or ws.get("duvalierCycle")
     if not isinstance(d, dict):
-        return "🎭 双衍王境：-"
+        return _unavailable_line("🎭 双衍王境", ws)
     st = _cycle_state("duviri", d)
     _, st_label = _cycle_label("duviri", st)
     tl = d.get("timeLeft")
@@ -585,7 +645,7 @@ def format_duviri_cycle(ws: dict) -> str:
 def format_nightwave(ws: dict) -> str:
     n = ws.get("seasonInfo") or ws.get("nightwave")
     if not isinstance(n, dict):
-        return "📡 电波：-"
+        return _unavailable_line("📡 电波", ws)
     season = n.get("season")
     tag = n.get("tag") or "-"
     if isinstance(season, (int, float)) or (isinstance(season, str) and str(season).isdigit()):

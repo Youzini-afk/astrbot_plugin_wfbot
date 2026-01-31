@@ -10,16 +10,16 @@
   - `/wf 状态`（别名：`status`、`info`）
   - `/wf 警报`（别名：`alerts`）
   - `/wf 突击`（别名：`sortie`）
-  - `/wf 执刑官猎杀`（别名：`archon`、`猎杀`、`执行官/执政官/执刑官`）
+  - `/wf 执刑官猎杀`（别名：`archon`、`猎杀`、`执行官/执政官/执刑官`）（部分可用，未完全解决数据源问题）
   - `/wf 奸商`（别名：`void`、`baro`、`虚空商人`）
-  - `/wf 仲裁`（别名：`arbitration`）
+  - `/wf 仲裁`（别名：`arbitration`）（暂不可用，未解决数据源问题）
   - `/wf 每日特惠`（别名：`daily`、`特惠`）
   - `/wf 入侵`（别名：`invasions`）
   - `/wf 裂隙` / `/wf 裂缝`（别名：`fissure`）
-  - `/wf 钢铁裂隙` / `/wf 钢铁裂缝`
-  - `/wf 九重天` / `/wf 九重天裂隙`
+  - `/wf 钢铁裂隙` / `/wf 钢铁裂缝`（暂不可用，未解决数据源问题）
+  - `/wf 九重天` / `/wf 九重天裂隙`（九重天裂缝，官方 worldstate 不提供任务类型字段，当前仅能显示纪元；任务类型显示为实验性推断，可能为空或不准确。）
   - `/wf 钢铁奖励`
-  - `/wf 平原` / `/wf 福尔图娜` / `/wf 魔胎之境` / `/wf 扎里曼`
+  - `/wf 平原` / `/wf 福尔图娜` / `/wf 魔胎之境` / `/wf 扎里曼`（部分可用）
   - `/wf 轮换` / `/wf 双衍王境`
   - `/wf 电波`
   - `/wf 订阅 <项目>`（别名：`subscribe`、`关注`）
@@ -67,6 +67,27 @@
   - `/wf 管理 订阅 <QQ> <项目> [过滤]`：为指定用户添加订阅
   - AstrBot 管理员依旧有效；可在 WebUI 为每个群配置额外管理员（见“配置”）
 
+## 数据源未来优化方向
+
+当前已接入：
+- 官方 worldstate（动态世界状态）
+- WarframeStat.us（结构化 worldstate 与循环/部分补全）
+- 官方 Public Export（静态数据）
+- warframe.market（市场基础数据）
+- 本地 warframestat root 文件（可用于仲裁/九重天补全）
+
+未来可选扩展：
+- Riven 价格：riven.market / Semlar / WarframeData
+- 配装与排行：Overframe（需解析并做缓存/限流）
+- Wiki 深度数据：Warframe Wiki (MediaWiki API / Lua 模块)
+- 数据库增强：WFCD/warframe-items
+
+优化想法：
+- **仲裁/九重天**：官方 worldstate 字段不全时，使用 warframestat root worldstate 进行补全。
+- **多源回退**：官方与社区数据源互为 fallback，避免单点故障导致空数据。
+- **缓存与节流**：对第三方源（market/overframe/wiki）开启缓存，避免频繁访问。
+- **按需开关**：按模块启用数据源，减少不必要请求与潜在限流。
+
 ## 安装
 - 直接在astrbot的插件市场搜索astrbot_plugin_wfbot，点击安装即可
 - 或者：
@@ -98,6 +119,13 @@
 - `subscriptions.notify_mode_default`：订阅通知策略默认值（`change` / `new_only`）
 - `subscriptions.notify_modes.<类型>`：按类型覆盖通知策略（如 `alerts` / `fissures` / `void_trader`）
 - `i18n.simplify_zh`：将繁体中文转换为简体（默认开启，主要用于 solNodes 等第三方数据源）
+- `store_user_name`：订阅存储是否保留用户昵称
+- `store_platform`：订阅存储是否保留平台信息
+- `store_group_id`：订阅存储是否保留群号（关闭可能影响 @）
+- `sources.*`：数据源策略（warframestat 端点/根 worldstate 与补全缓存）
+  - `sources.warframestat_base_url`：warframestat 基础地址
+  - `sources.warframestat_mirror_urls`：warframestat 镜像列表（按顺序尝试）
+  - `sources.warframestat_root_file`：本地 warframestat root JSON（手动补全用）
 - `log.enabled`：日志总开关（关闭后屏蔽本插件所有日志）
 - `log.main_enabled`：主流程日志
 - `log.manager_enabled`：数据刷新/后台循环日志
@@ -113,14 +141,45 @@
 - `admin.session_admins`：按会话配置管理员（高级，需 unified_msg_origin）
 - 配置为列表格式：`[{ "group_id": "123456", "admins": ["111","222"] }]`
 
+## 本地补全脚本（warframestat root）
+
+当 warframestat 无法访问时，可手动拉取并保存到本地文件供补全使用：
+
+```bash
+python scripts/fetch_warframestat_root.py
+```
+
+常用参数：
+
+```bash
+python scripts/fetch_warframestat_root.py --lang zh --out worldstate/warframestat_root.json
+python scripts/fetch_warframestat_root.py --base https://你的镜像域名
+python scripts/fetch_warframestat_root.py --mirror https://镜像1 --mirror https://镜像2
+```
+
+脚本写入的文件可通过 `sources.warframestat_root_file` 指定（默认会尝试 `worldstate/warframestat_root.json`）。
+
 ## 存储规范
 
 - 小型 KV 数据（AstrBot >= 4.9.2）：可用 `put_kv_data/get_kv_data/delete_kv_data`（本插件目前主要使用文件存储）
 - 大文件/缓存：存放在 `data/plugin_data/<插件名>/` 下（本插件会将数据写入 `data/plugin_data/astrbot_plugin_wfbot/warframe/`）
+- 订阅存储会包含用户信息（如 UID/群号/昵称），可通过 `store_*` 选项关闭部分字段
 
 说明：旧版本配置字段仍保留但已隐藏（`invisible`），用于兼容历史配置。
 
 ## 更新历史
+
+- 2026-02-01
+  - 日志配置迁移到 `log.*`，新增日志总开关与子模块细分开关（兼容旧 `log_*`）。
+  - 新增订阅隐私存储开关（`store_user_name`/`store_platform`/`store_group_id`）。
+  - PublicExport manifest 下载增加重试与空文件保护。
+  - 后台循环错误日志节流（默认 60s/次）。
+  - 尝试修复/wf 九重天数据为空的问题，未能解决任务类型为空。
+  - 尝试修复/wf 仲裁数据为空的问题，未能解决数据源问题。
+  - 新增数据源策略配置 `sources.*`（warframestat 子端点/根 worldstate 补全与缓存）。
+  - 当对应模块数据缺失时，不再返回 “-”，而是提示“数据源不可用 / worldstate 不可用”。
+  - 支持自定义 warframestat 基础地址/镜像列表与本地补全文件。
+  - 增加本地补全拉取脚本：`scripts/fetch_warframestat_root.py`。
 
 - 2026-01-31
   - 简体中文输出增强：当 OpenCC 不可用时自动回退到 `zhconv` 转换。
@@ -130,7 +189,6 @@
   - cycles 回退补全地球周期，减少回退缺失。
   - 直连失败时可回退代理请求（若配置了代理/系统代理）。
   - `no_proxy_suffixes` 默认加入 `warframestat.us`。
-  - 日志配置迁移到 `log.*`，新增日志总开关与子模块细分开关（兼容旧 `log_*`）。
 
 ## 致谢
 

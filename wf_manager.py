@@ -88,6 +88,8 @@ class WarframeDataManager:
 
         self._worldstate_mem: Any | None = None
         self._worldstate_mem_at: float | None = None
+        self._loop_error_last_ts: float | None = None
+        self._loop_error_interval_seconds: float = 60.0
 
     def register_mirrors(self, datasets: Iterable[MirrorDataset]) -> None:
         self._mirrors = list(datasets)
@@ -588,7 +590,13 @@ class WarframeDataManager:
                     await self.cleanup_async()
                     next_cleanup = now + 6 * 3600.0
             except Exception:
-                log_exception("warframe data manager loop error", category="manager")
+                now_ts = time.monotonic()
+                if (
+                    self._loop_error_last_ts is None
+                    or (now_ts - self._loop_error_last_ts) >= self._loop_error_interval_seconds
+                ):
+                    log_exception("warframe data manager loop error", category="manager")
+                    self._loop_error_last_ts = now_ts
 
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)

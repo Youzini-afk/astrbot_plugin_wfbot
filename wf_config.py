@@ -32,6 +32,14 @@ class WarframeConfig:
     log_main_enabled: bool = True
     log_cycle_fetch_failures: bool = True
     log_cycle_fetch_success: bool = True
+    store_user_name: bool = True
+    store_platform: bool = True
+    store_group_id: bool = True
+    source_use_warframestat_endpoints: bool = True
+    source_use_warframestat_root: bool = True
+    source_warframestat_base_url: str = "https://api.warframestat.us"
+    source_warframestat_mirror_urls: tuple[str, ...] = ()
+    source_warframestat_root_file: str | None = None
 
     # Data refresh intervals (seconds). Set to 0 to disable background refresh for that job.
     worldstate_refresh_interval: float = 600.0  # NyxBot: every 10 min

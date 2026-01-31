@@ -99,10 +99,11 @@ class WarframeDatasourcePlugin(Star):
         subs_cfg = self._get_cfg_section("subscriptions")
         http_cfg = self._get_cfg_section("http")
         log_cfg = self._get_cfg_section("log")
+        sources_cfg = self._get_cfg_section("sources")
         admin_cfg = self._get_cfg_section("admin")
         i18n_cfg = self._get_cfg_section("i18n")
 
-        wf_cfg = self._build_wf_config(data_dir, refresh_cfg, retention_cfg, http_cfg, log_cfg)
+        wf_cfg = self._build_wf_config(data_dir, refresh_cfg, retention_cfg, http_cfg, log_cfg, sources_cfg)
         configure_logging(
             enabled=wf_cfg.log_enabled,
             cycle_enabled=wf_cfg.log_cycle_enabled,
@@ -120,6 +121,14 @@ class WarframeDatasourcePlugin(Star):
 
         self.ds = WarframeDataSource.create(wf_cfg, plugin_id=PLUGIN_ID)
         self.mgr = self.ds.create_manager()
+        self._store_user_name = wf_cfg.store_user_name
+        self._store_platform = wf_cfg.store_platform
+        self._store_group_id = wf_cfg.store_group_id
+        self._source_use_warframestat_endpoints = wf_cfg.source_use_warframestat_endpoints
+        self._source_use_warframestat_root = wf_cfg.source_use_warframestat_root
+        self._warframestat_base_url = wf_cfg.source_warframestat_base_url
+        self._warframestat_mirror_urls = wf_cfg.source_warframestat_mirror_urls
+        self._warframestat_root_file = wf_cfg.source_warframestat_root_file
 
         self._init_subscription_config(subs_cfg)
         self._simplify_zh = bool(i18n_cfg.get("simplify_zh", True))
@@ -136,6 +145,15 @@ class WarframeDatasourcePlugin(Star):
         self._extras_cache: dict[str, dict] = {}
         self._extras_cache_at: float | None = None
         self._extras_cache_ttl = 120.0
+        extras_ttl_cfg = sources_cfg.get("extras_cache_ttl_seconds") if isinstance(sources_cfg, dict) else None
+        try:
+            if extras_ttl_cfg is not None:
+                self._extras_cache_ttl = float(extras_ttl_cfg)
+        except Exception:
+            pass
+        self._warframestat_root_cache: dict | None = None
+        self._warframestat_root_cache_at: float | None = None
+        self._warframestat_root_cache_ttl = self._extras_cache_ttl
         self._translation_cache: dict[str, str] = {}
         self._translation_cache_at: float | None = None
         self._translation_cache_ttl = 1800.0
@@ -173,7 +191,15 @@ class WarframeDatasourcePlugin(Star):
         val = self.config.get(key, {})
         return val if isinstance(val, dict) else {}
 
-    def _build_wf_config(self, data_dir: Path, refresh_cfg: dict, retention_cfg: dict, http_cfg: dict, log_cfg: dict) -> WarframeConfig:
+    def _build_wf_config(
+        self,
+        data_dir: Path,
+        refresh_cfg: dict,
+        retention_cfg: dict,
+        http_cfg: dict,
+        log_cfg: dict,
+        sources_cfg: dict,
+    ) -> WarframeConfig:
         max_req_time = http_cfg.get("max_request_time_seconds", 30)
         try:
             max_req_time_f: float | None = float(max_req_time)
@@ -201,9 +227,9 @@ class WarframeDatasourcePlugin(Star):
                 return bool(value)
             if isinstance(value, str):
                 s = value.strip().lower()
-                if s in {"1", "true", "yes", "on"}:
+                if s in {"1", "true", "yes", "on", "enable", "enabled", "开启"}:
                     return True
-                if s in {"0", "false", "no", "off"}:
+                if s in {"0", "false", "no", "off", "disable", "disabled", "关闭"}:
                     return False
                 return default
             return bool(value)
@@ -212,6 +238,27 @@ class WarframeDatasourcePlugin(Star):
             if isinstance(log_cfg, dict) and key in log_cfg:
                 return _as_bool(log_cfg.get(key), default)
             return _as_bool(self.config.get(f"log_{key}", default), default)
+
+        def _src_get(key: str, default: bool) -> bool:
+            if isinstance(sources_cfg, dict) and key in sources_cfg:
+                return _as_bool(sources_cfg.get(key), default)
+            return _as_bool(self.config.get(f"sources_{key}", default), default)
+
+        def _src_get_str(key: str, default: str) -> str:
+            if isinstance(sources_cfg, dict) and key in sources_cfg:
+                val = sources_cfg.get(key)
+            else:
+                val = self.config.get(f"sources_{key}", default)
+            return str(val).strip() if val is not None else default
+
+        def _src_get_list(key: str) -> tuple[str, ...]:
+            raw = sources_cfg.get(key) if isinstance(sources_cfg, dict) else self.config.get(f"sources_{key}")
+            if isinstance(raw, list):
+                items = [str(x).strip() for x in raw if str(x).strip()]
+                return tuple(items)
+            if isinstance(raw, str) and raw.strip():
+                return (raw.strip(),)
+            return ()
 
         return WarframeConfig(
             data_dir=data_dir,
@@ -237,6 +284,14 @@ class WarframeDatasourcePlugin(Star):
             log_main_enabled=_log_get("main_enabled", True),
             log_cycle_fetch_failures=_log_get("cycle_fetch_failures", True),
             log_cycle_fetch_success=_log_get("cycle_fetch_success", True),
+            store_user_name=_as_bool(self.config.get("store_user_name", True), True),
+            store_platform=_as_bool(self.config.get("store_platform", True), True),
+            store_group_id=_as_bool(self.config.get("store_group_id", True), True),
+            source_use_warframestat_endpoints=_src_get("use_warframestat_endpoints", True),
+            source_use_warframestat_root=_src_get("use_warframestat_root", True),
+            source_warframestat_base_url=_src_get_str("warframestat_base_url", "https://api.warframestat.us"),
+            source_warframestat_mirror_urls=_src_get_list("warframestat_mirror_urls"),
+            source_warframestat_root_file=(_src_get_str("warframestat_root_file", "") or None),
         )
 
     def _build_image_config(self, render_cfg: dict) -> ImageRenderConfig:
@@ -734,14 +789,85 @@ class WarframeDatasourcePlugin(Star):
             "missions": out_m if out_m is not None else missions,
         }
 
-    async def _fetch_warframestat_json(self, endpoint: str) -> dict | None:
+    def _normalize_warframestat_void_storms(self, data: list | dict) -> list[dict]:
+        storms = data.get("voidStorms") if isinstance(data, dict) else data
+        if not isinstance(storms, list):
+            return []
+        out: list[dict] = []
+        for m in storms:
+            if not isinstance(m, dict):
+                continue
+            out.append(
+                {
+                    "node": m.get("node") or m.get("location") or m.get("nodeKey"),
+                    "missionType": m.get("missionType") or m.get("missionTypeKey") or m.get("type") or m.get("typeKey"),
+                    "tier": m.get("tier") or m.get("modifier") or m.get("tierKey"),
+                    "expiry": m.get("expiry") or m.get("endTime"),
+                    "activation": m.get("activation") or m.get("startTime"),
+                    "hard": m.get("hard"),
+                    "id": m.get("id"),
+                }
+            )
+        return out
+
+    def _warframestat_url_candidates(self, endpoint: str | None) -> list[str]:
         lang = str(self.config.get("public_export_language", "zh") or "zh")
-        urls = [
-            f"https://api.warframestat.us/pc/{endpoint}?language={lang}",
-            f"https://r.jina.ai/http://api.warframestat.us/pc/{endpoint}?language={lang}",
-            f"https://r.jina.ai/https://api.warframestat.us/pc/{endpoint}?language={lang}",
-        ]
-        for url in urls:
+        bases = [self._warframestat_base_url, *self._warframestat_mirror_urls]
+        urls: list[str] = []
+        for base in bases:
+            if not isinstance(base, str):
+                continue
+            b = base.strip().rstrip("/")
+            if not b:
+                continue
+            if b.endswith("/pc"):
+                root = b
+            else:
+                root = b + "/pc"
+            path = root if endpoint is None else f"{root}/{endpoint}"
+            url = f"{path}?language={lang}"
+            urls.append(url)
+            stripped = url
+            if stripped.startswith("https://"):
+                stripped = stripped[len("https://") :]
+            elif stripped.startswith("http://"):
+                stripped = stripped[len("http://") :]
+            urls.append(f"https://r.jina.ai/http://{stripped}")
+            urls.append(f"https://r.jina.ai/https://{stripped}")
+        return urls
+
+    def _resolve_warframestat_root_file(self) -> Path | None:
+        candidates: list[str] = []
+        if isinstance(self._warframestat_root_file, str) and self._warframestat_root_file.strip():
+            candidates.append(self._warframestat_root_file.strip())
+        base = Path(__file__).resolve().parent
+        candidates.append(str(base / "worldstate" / "warframestat_root.json"))
+        candidates.append(str(base / "worldstate" / "warframestat_root.parsed.json"))
+        for raw in candidates:
+            path = Path(raw)
+            if not path.is_absolute():
+                path = (base / raw).resolve()
+            if path.exists() and path.is_file():
+                return path
+        return None
+
+    def _load_local_warframestat_root(self) -> dict | None:
+        path = self._resolve_warframestat_root_file()
+        if not path:
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            log_debug("local warframestat root read failed: %s", path, exc_info=True, category="http")
+            return None
+        if isinstance(data, dict) and data:
+            return data
+        return None
+
+    async def _fetch_warframestat_json(self, endpoint: str) -> dict | None:
+        if not self._source_use_warframestat_endpoints:
+            return None
+        for url in self._warframestat_url_candidates(endpoint):
             try:
                 resp = await self.ds.http.get(url)
             except Exception:
@@ -752,9 +878,40 @@ class WarframeDatasourcePlugin(Star):
                 data = resp.json()
             except Exception:
                 continue
-            if isinstance(data, dict):
+            if isinstance(data, dict) and "error" in data:
+                continue
+            if isinstance(data, (dict, list)):
                 return data
         log_debug("warframestat fetch failed: %s", endpoint, exc_info=True, category="http")
+        return None
+
+    async def _fetch_warframestat_root(self) -> dict | None:
+        if not self._source_use_warframestat_root:
+            return None
+        local = self._load_local_warframestat_root()
+        if isinstance(local, dict):
+            self._warframestat_root_cache = local
+            self._warframestat_root_cache_at = time.monotonic()
+            return local
+        now = time.monotonic()
+        if self._warframestat_root_cache_at is not None and (now - self._warframestat_root_cache_at) <= self._warframestat_root_cache_ttl:
+            return dict(self._warframestat_root_cache or {})
+        for url in self._warframestat_url_candidates(None):
+            try:
+                resp = await self.ds.http.get(url)
+            except Exception:
+                continue
+            if not (200 <= resp.status < 400):
+                continue
+            try:
+                data = resp.json()
+            except Exception:
+                continue
+            if isinstance(data, dict) and "error" not in data:
+                self._warframestat_root_cache = data
+                self._warframestat_root_cache_at = time.monotonic()
+                return data
+        log_debug("warframestat root fetch failed", exc_info=True, category="http")
         return None
 
     async def _get_extras_cache(self) -> dict[str, dict]:
@@ -781,12 +938,34 @@ class WarframeDatasourcePlugin(Star):
             ah = await self._fetch_warframestat_json("archonHunt")
             if isinstance(ah, dict):
                 extras["archonHunt"] = self._normalize_warframestat_archon(ah)
+            vs = await self._fetch_warframestat_json("voidStorms")
+            if isinstance(vs, (dict, list)):
+                storms = self._normalize_warframestat_void_storms(vs)
+                if storms:
+                    extras["voidStorms"] = storms
+
+            if "arbitration" not in extras or "voidStorms" not in extras:
+                root = await self._fetch_warframestat_root()
+                if isinstance(root, dict):
+                    if "arbitration" not in extras and isinstance(root.get("arbitration"), dict):
+                        extras["arbitration"] = self._normalize_warframestat_arbitration(root.get("arbitration") or {})
+                    if "voidStorms" not in extras and isinstance(root.get("voidStorms"), list):
+                        storms = self._normalize_warframestat_void_storms(root)
+                        if storms:
+                            extras["voidStorms"] = storms
             self._extras_cache = extras
             self._extras_cache_at = time.monotonic()
             return dict(extras)
 
     async def _merge_extras_ws(self, ws: dict) -> dict:
-        need_arb = not isinstance(ws.get("arbitration"), dict)
+        arb = ws.get("arbitration")
+        need_arb = not isinstance(arb, dict)
+        if isinstance(arb, dict):
+            node = arb.get("node") or arb.get("location") or arb.get("nodeName") or arb.get("nodeKey")
+            mtype = arb.get("type") or arb.get("missionType")
+            exp = arb.get("expiry") or arb.get("endTime")
+            if not node or not mtype or not exp:
+                need_arb = True
         sp = ws.get("steelPathOffering") or ws.get("steelPath")
         need_sp = not isinstance(sp, dict) or not (sp.get("rotation") or sp.get("currentReward") or sp.get("nextReward"))
         vt = ws.get("voidTrader")
@@ -816,7 +995,11 @@ class WarframeDatasourcePlugin(Star):
             or not isinstance(archon.get("boss") or archon.get("bossName"), str)
             or str(archon.get("boss") or archon.get("bossName")).startswith("SORTIE_")
         )
-        if not need_arb and not need_sp and not need_vt and not need_sortie and not need_archon:
+        storms = ws.get("voidStorms")
+        need_storms = not isinstance(storms, list)
+        if isinstance(storms, list) and storms:
+            need_storms = any(not isinstance(m, dict) or not m.get("missionType") for m in storms)
+        if not need_arb and not need_sp and not need_vt and not need_sortie and not need_archon and not need_storms:
             return ws
         extras = await self._get_extras_cache()
         if not extras:
@@ -834,6 +1017,8 @@ class WarframeDatasourcePlugin(Star):
             out["sortie"] = extras["sortie"]
         if need_archon and isinstance(extras.get("archonHunt"), dict):
             out["archonHunt"] = extras["archonHunt"]
+        if need_storms and isinstance(extras.get("voidStorms"), list):
+            out["voidStorms"] = extras["voidStorms"]
         return out
 
     async def _build_state_translation_map(self) -> dict[str, str]:
@@ -1403,6 +1588,8 @@ class WarframeDatasourcePlugin(Star):
             tier = (filters.get("tier") or "").lower() or None
             mission = (filters.get("mission") or "").lower() or None
             planet = (filters.get("planet") or "").lower() or None
+            if kind == "storm":
+                ws = await self._merge_extras_ws(ws)
             title = self._topic_label(topic)
             msg = self._format_fissures_filtered(ws, nodes_map=nodes, kind=kind, tier=tier, mission=mission, planet=planet)
             return title, msg
@@ -1455,8 +1642,11 @@ class WarframeDatasourcePlugin(Star):
         else:
             fiss = ws.get("activeMissions", [])
 
+        title = {"normal": "普通", "steel": "钢铁", "storm": "九重天"}.get(kind, kind)
         if not isinstance(fiss, list):
-            return "fissures: -"
+            if not ws:
+                return f"🌀 裂缝·{title}：世界状态不可用，请先 /wf 更新"
+            return f"🌀 裂缝·{title}：数据源不可用"
 
         out = []
         for m in fiss:
@@ -1469,13 +1659,21 @@ class WarframeDatasourcePlugin(Star):
                 continue
 
             if tier:
-                t_code = m.get("modifier") or m.get("tier") or ""
+                t_code = (
+                    m.get("modifier")
+                    or m.get("tier")
+                    or m.get("tierKey")
+                    or m.get("tierName")
+                    or m.get("ActiveMissionTier")
+                    or m.get("activeMissionTier")
+                    or ""
+                )
                 t_key = self._tier_key_from_code(t_code)
                 if not t_key or t_key != tier.lower():
                     continue
 
             if mission:
-                mt_code = m.get("missionType") or m.get("MissionType") or ""
+                mt_code = m.get("missionType") or m.get("MissionType") or m.get("missionTypeKey") or m.get("type") or ""
                 mt_key = self._mission_key_from_code(mt_code)
                 if not mt_key or mt_key != mission.lower():
                     continue
@@ -1492,7 +1690,6 @@ class WarframeDatasourcePlugin(Star):
 
             out.append(m)
 
-        title = {"normal": "普通", "steel": "钢铁", "storm": "九重天"}.get(kind, kind)
         filter_bits: list[str] = []
         if mission:
             filter_bits.append(
@@ -1563,7 +1760,17 @@ class WarframeDatasourcePlugin(Star):
         obj = ws.get(key)
         if not isinstance(obj, dict):
             log_debug("cycle data missing for %s: obj=%s, ws keys=%s", key, obj, list(ws.keys()), category="cycle")
-            return f"{key}: -"
+            titles = {
+                "earth": "🌍 地球",
+                "cetus": "🌾 夜灵平原",
+                "vallis": "❄️ 福尔图娜",
+                "cambion": "🦠 魔胎之境",
+                "zariman": "🚢 扎里曼",
+            }
+            title = titles.get(zone, key)
+            if not ws:
+                return f"{title}：世界状态不可用，请先 /wf 更新"
+            return f"{title}：数据源不可用"
 
         def state_of(o: dict) -> str:
             st = o.get("state")
@@ -2556,6 +2763,7 @@ class WarframeDatasourcePlugin(Star):
         if ws is None:
             yield event.plain_result("worldstate unavailable, use /wf 更新")
             return
+        ws = await self._merge_extras_ws(ws)
         nodes = await self._build_nodes_map()
         msg = format_fissures(ws, nodes_map=nodes, kind="storm")
         async for r in self._send_text_or_image(event, title="九重天裂隙", text=msg):
@@ -2736,7 +2944,13 @@ class WarframeDatasourcePlugin(Star):
             async with self._sub_lock:
                 data = await self._sub_store.load()
                 added = self._sub_store.upsert_topic(
-                    data, umo=umo, uid=uid, topic=t, user_name=uname, platform=platform_name, group_id=group_id
+                    data,
+                    umo=umo,
+                    uid=uid,
+                    topic=t,
+                    user_name=uname if self._store_user_name else None,
+                    platform=platform_name if self._store_platform else None,
+                    group_id=group_id if self._store_group_id else None,
                 )
             if sig is not None:
                 self._sub_store.set_last_sig(data, umo=umo, uid=uid, topic=t, sig=sig)
@@ -3063,9 +3277,9 @@ class WarframeDatasourcePlugin(Star):
                     umo=event.unified_msg_origin,
                     uid=str(target_uid),
                     topic=t,
-                    user_name=None,
-                    platform=platform_name,
-                    group_id=group_id,
+                    user_name=None if not self._store_user_name else None,
+                    platform=platform_name if self._store_platform else None,
+                    group_id=group_id if self._store_group_id else None,
                 )
                 if sig is not None:
                     self._sub_store.set_last_sig(data, umo=event.unified_msg_origin, uid=str(target_uid), topic=t, sig=sig)

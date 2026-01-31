@@ -104,13 +104,14 @@ def _normalize_official_worldstate(ws: dict[str, Any]) -> dict[str, Any]:
     def norm_void_storm(m: Any) -> Any:
         if not isinstance(m, dict):
             return m
+        tier_val = m.get("ActiveMissionTier") or m.get("activeMissionTier") or m.get("tier") or m.get("Tier")
         return {
             "id": m.get("id") or m.get("_id"),
             "node": m.get("node") or m.get("Node"),
             "location": m.get("location") or m.get("Node"),
-            "missionType": m.get("missionType") or m.get("MissionType"),
-            "modifier": m.get("modifier") or m.get("Modifier"),
-            "tier": m.get("tier") or m.get("Modifier"),
+            "missionType": m.get("missionType") or m.get("MissionType") or m.get("missionTypeKey") or m.get("Type"),
+            "modifier": m.get("modifier") or m.get("Modifier") or m.get("tierKey") or tier_val,
+            "tier": m.get("tier") or m.get("tierKey") or tier_val,
             "hard": m.get("hard") if "hard" in m else m.get("Hard"),
             "expiry": _unwrap_date(m.get("Expiry")),
             "activation": _unwrap_date(m.get("Activation")),
@@ -383,4 +384,3 @@ class WorldStateClient:
 
     async def load_cached(self) -> Any | None:
         return await self._cache.read_json("worldstate", "latest.parsed.json")
-

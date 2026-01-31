@@ -132,6 +132,51 @@
       }
     }
   },
+  "sources": {
+    "type": "object",
+    "description": "数据源策略",
+    "items": {
+      "use_warframestat_endpoints": {
+        "type": "bool",
+        "default": true,
+        "description": "使用 warframestat 子端点（arbitration/voidStorms 等）",
+        "hint": "关闭后将不请求 warframestat 的具体端点，仅使用 root worldstate/官方源。"
+      },
+      "use_warframestat_root": {
+        "type": "bool",
+        "default": true,
+        "description": "使用 warframestat root worldstate 补全",
+        "hint": "当官方 worldstate 字段缺失时，用 warframestat root 补全。"
+      },
+      "warframestat_base_url": {
+        "type": "string",
+        "default": "https://api.warframestat.us",
+        "description": "warframestat API 基础地址（无需带 /pc）",
+        "hint": "当默认域名不可用时可改为自建镜像或代理地址。"
+      },
+      "warframestat_mirror_urls": {
+        "type": "array",
+        "description": "warframestat 备选镜像地址（按顺序尝试）",
+        "default": [],
+        "hint": "支持多个镜像；每个地址无需带 /pc。",
+        "items": {
+          "type": "string"
+        }
+      },
+      "warframestat_root_file": {
+        "type": "string",
+        "default": "",
+        "description": "本地 warframestat root worldstate JSON 文件路径",
+        "hint": "用于手工补全（如仲裁/九重天）。支持相对路径，默认会尝试 ./worldstate/warframestat_root.json。"
+      },
+      "extras_cache_ttl_seconds": {
+        "type": "int",
+        "default": 120,
+        "description": "补全数据缓存时间（秒）",
+        "hint": "减少对 warframestat 的请求频率。"
+      }
+    }
+  },
   "retention": {
     "type": "object",
     "description": "存储与清理",
@@ -355,6 +400,24 @@
         "hint": "部分第三方数据源（如 warframestat solNodes）返回繁体；开启后会使用 OpenCC(t2s) 在本地转换。"
       }
     }
+  },
+  "store_user_name": {
+    "type": "bool",
+    "default": true,
+    "description": "订阅存储用户名",
+    "hint": "关闭后不再在订阅存储中保存用户昵称。"
+  },
+  "store_platform": {
+    "type": "bool",
+    "default": true,
+    "description": "订阅存储平台信息",
+    "hint": "关闭后不再保存平台字段。"
+  },
+  "store_group_id": {
+    "type": "bool",
+    "default": true,
+    "description": "订阅存储群号",
+    "hint": "关闭后不再保存群号（可能影响 @ 提醒）。"
   },
 
   "worldstate_refresh_interval": {

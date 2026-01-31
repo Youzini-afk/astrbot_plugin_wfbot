@@ -212,7 +212,7 @@ class PublicExportClient:
         if not changed:
             return PublicExportUpdateResult(
                 language=language,
-                index_status=resp.status,
+                index_status=last_status,
                 changed_files=[],
                 downloaded_files=[],
             )
@@ -242,8 +242,18 @@ class PublicExportClient:
 
             manifest_url = PUBLIC_EXPORT_MANIFEST_URL % line
             manifest_resp = await self._http.download_to(manifest_url, str(out_path))
+            if not (200 <= manifest_resp.status < 300):
+                # retry once with cache-busting query
+                manifest_url_retry = f"{manifest_url}?t={int(time.time())}"
+                manifest_resp = await self._http.download_to(manifest_url_retry, str(out_path))
             if 200 <= manifest_resp.status < 300:
-                downloaded.append(filename)
+                try:
+                    if out_path.exists() and out_path.stat().st_size > 0:
+                        downloaded.append(filename)
+                    else:
+                        log_warning("public export empty file: %s", filename, category="public_export")
+                except Exception:
+                    downloaded.append(filename)
 
         return PublicExportUpdateResult(
             language=language,
