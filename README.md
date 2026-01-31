@@ -33,6 +33,10 @@
   - 开启后，`/wf` 输出会渲染成图片发送
   - 可选图片缓存（按数量保留）
 
+- 数据获取与兼容
+  - cycles 拉取失败时可从缓存 worldstate 回退，减少空数据
+  - 直连失败时可回退代理（如配置了 `proxy_url` 或系统代理）
+
 - 订阅推送
   - 订阅会绑定到当前会话（使用 `unified_msg_origin`），当 worldstate 更新时会主动推送到该会话
   - 订阅会同时绑定订阅者 ID（同一群聊里不同人订阅互不影响）
@@ -87,6 +91,7 @@
 - `public_export_language`：PublicExport 语言（如 `zh` / `en`）
 - `refresh.*`：各数据源刷新间隔（秒）
 - `http.*`：网络与代理（支持设置 `proxy_url`）
+  - `no_proxy_suffixes` 默认包含 `warframe.com` 与 `warframestat.us`
 - `retention.*`：清理保留策略
 - `render.*`：图片模式与图片缓存（支持自定义宽度/字号/字体路径/emoji 处理方式）
 - `subscriptions.cycles_default_offset_minutes`：平原/循环订阅默认提前/后置分钟数（>0 提前，<0 后置）
@@ -110,6 +115,10 @@
   - 简体中文输出增强：当 OpenCC 不可用时自动回退到 `zhconv` 转换。
   - PublicExport 物品名在缓存阶段即进行简体化，减少繁体漏网。
   - 依赖补充：新增 `zhconv`。
+  - 裂缝订阅支持按星球过滤（如“天王星”）。
+  - cycles 回退补全地球周期，减少回退缺失。
+  - 直连失败时可回退代理请求（若配置了代理/系统代理）。
+  - `no_proxy_suffixes` 默认加入 `warframestat.us`。
 
 ## 致谢
 
