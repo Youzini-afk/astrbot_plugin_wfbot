@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from astrbot.api.all import *  # type: ignore
-from astrbot.api import logger  # type: ignore
+from .wf_logging import debug as log_debug
+from .wf_logging import exception as log_exception
+from .wf_logging import warning as log_warning
 from astrbot.api.event import filter as afilter  # type: ignore
 import astrbot.api.message_components as Comp
 
@@ -37,6 +39,7 @@ from .wf_format import (
 from .wf_render import ImageRenderConfig, get_or_render_png
 from .wf_subscriptions import SubscriptionStore
 from .wf_i18n import to_simplified_zh
+from .wf_logging import configure as configure_logging
 
 
 PLUGIN_ID = "astrbot_plugin_wfbot"
@@ -95,10 +98,23 @@ class WarframeDatasourcePlugin(Star):
         render_cfg = self._get_cfg_section("render")
         subs_cfg = self._get_cfg_section("subscriptions")
         http_cfg = self._get_cfg_section("http")
+        log_cfg = self._get_cfg_section("log")
         admin_cfg = self._get_cfg_section("admin")
         i18n_cfg = self._get_cfg_section("i18n")
 
-        wf_cfg = self._build_wf_config(data_dir, refresh_cfg, retention_cfg, http_cfg)
+        wf_cfg = self._build_wf_config(data_dir, refresh_cfg, retention_cfg, http_cfg, log_cfg)
+        configure_logging(
+            enabled=wf_cfg.log_enabled,
+            cycle_enabled=wf_cfg.log_cycle_enabled,
+            http_enabled=wf_cfg.log_http_enabled,
+            public_export_enabled=wf_cfg.log_public_export_enabled,
+            subscription_enabled=wf_cfg.log_subscription_enabled,
+            cache_enabled=wf_cfg.log_cache_enabled,
+            manager_enabled=wf_cfg.log_manager_enabled,
+            main_enabled=wf_cfg.log_main_enabled,
+            cycle_failures=wf_cfg.log_cycle_fetch_failures,
+            cycle_success=wf_cfg.log_cycle_fetch_success,
+        )
         self.img_cfg = self._build_image_config(render_cfg)
         self.img_dir = data_dir / "images"
 
@@ -145,19 +161,19 @@ class WarframeDatasourcePlugin(Star):
                     val = await getter("wf_push_enabled", True)
                     self._push_enabled = bool(val)
                 except Exception:
-                    logger.debug("load kv wf_push_enabled failed", exc_info=True)
+                    log_debug("load kv wf_push_enabled failed", exc_info=True, category="main")
                 try:
                     val = await getter("wf_subscribe_enabled", True)
                     self._subscribe_enabled = bool(val)
                 except Exception:
-                    logger.debug("load kv wf_subscribe_enabled failed", exc_info=True)
+                    log_debug("load kv wf_subscribe_enabled failed", exc_info=True, category="main")
             self._maybe_start_background()
 
     def _get_cfg_section(self, key: str) -> dict:
         val = self.config.get(key, {})
         return val if isinstance(val, dict) else {}
 
-    def _build_wf_config(self, data_dir: Path, refresh_cfg: dict, retention_cfg: dict, http_cfg: dict) -> WarframeConfig:
+    def _build_wf_config(self, data_dir: Path, refresh_cfg: dict, retention_cfg: dict, http_cfg: dict, log_cfg: dict) -> WarframeConfig:
         max_req_time = http_cfg.get("max_request_time_seconds", 30)
         try:
             max_req_time_f: float | None = float(max_req_time)
@@ -175,6 +191,12 @@ class WarframeDatasourcePlugin(Star):
         if not proxy_url:
             proxy_url = None
 
+        # log.* with fallback to legacy top-level keys for compatibility
+        def _log_get(key: str, default: bool) -> bool:
+            if isinstance(log_cfg, dict) and key in log_cfg:
+                return bool(log_cfg.get(key, default))
+            return bool(self.config.get(f"log_{key}", self.config.get(key, default)))
+
         return WarframeConfig(
             data_dir=data_dir,
             public_export_language=str(self.config.get("public_export_language", "zh")),
@@ -189,6 +211,16 @@ class WarframeDatasourcePlugin(Star):
             http_no_proxy_enabled=bool(http_cfg.get("no_proxy_enabled", True)),
             http_no_proxy_suffixes=no_proxy_suffixes,
             http_proxy_url=proxy_url,
+            log_enabled=_log_get("enabled", True),
+            log_cycle_enabled=_log_get("cycle_enabled", True),
+            log_http_enabled=_log_get("http_enabled", True),
+            log_public_export_enabled=_log_get("public_export_enabled", True),
+            log_subscription_enabled=_log_get("subscription_enabled", True),
+            log_cache_enabled=_log_get("cache_enabled", True),
+            log_manager_enabled=_log_get("manager_enabled", True),
+            log_main_enabled=_log_get("main_enabled", True),
+            log_cycle_fetch_failures=_log_get("cycle_fetch_failures", True),
+            log_cycle_fetch_success=_log_get("cycle_fetch_success", True),
         )
 
     def _build_image_config(self, render_cfg: dict) -> ImageRenderConfig:
@@ -222,7 +254,7 @@ class WarframeDatasourcePlugin(Star):
 
             return Path(StarTools.get_data_dir(PLUGIN_ID))
         except Exception as e:
-            logger.debug("StarTools.get_data_dir failed: %s", e)
+            log_debug("StarTools.get_data_dir failed: %s", e, category="main")
 
         # Fallback: official path helper (older docs): data/plugin_data/<plugin_name>/
         try:
@@ -231,8 +263,8 @@ class WarframeDatasourcePlugin(Star):
             plugin_name = str(getattr(self, "name", PLUGIN_ID) or PLUGIN_ID)
             return Path(get_astrbot_data_path()) / "plugin_data" / plugin_name
         except Exception as e:
-            logger.debug("get_astrbot_data_path fallback failed: %s", e)
-        logger.warning("fallback to plugin-local data dir")
+            log_debug("get_astrbot_data_path fallback failed: %s", e, category="main")
+        log_warning("fallback to plugin-local data dir", category="main")
         return Path(__file__).resolve().parent / ".plugin_data"
 
     async def _send_text_or_image(self, event: AstrMessageEvent, *, title: str, text: str):
@@ -307,7 +339,7 @@ class WarframeDatasourcePlugin(Star):
                 await self.context.send_message(unified_msg_origin, MessageChain().message(text))
                 return True
             except Exception:
-                logger.debug("send_message fallback failed", exc_info=True)
+                log_debug("send_message fallback failed", exc_info=True, category="main")
         return False
 
     async def _push_text_or_image(self, unified_msg_origin: str, *, title: str, text: str) -> bool:
@@ -378,7 +410,7 @@ class WarframeDatasourcePlugin(Star):
             await client.api.call_action("send_group_msg", group_id=int(group_id), message=message)
             return True
         except Exception:
-            logger.debug("aiocqhttp at-send failed", exc_info=True)
+            log_debug("aiocqhttp at-send failed", exc_info=True, category="main")
             return False
 
     def _is_custom_admin(self, event: AstrMessageEvent) -> bool:
@@ -517,7 +549,7 @@ class WarframeDatasourcePlugin(Star):
             if v is not None and isinstance(v, dict):
                 return v
             # If cache is empty, return None (don't trigger refresh here to avoid cascading calls)
-            logger.debug("cycle cache miss: %s (returned: %s)", name, type(v).__name__ if v is not None else "None")
+            log_debug("cycle cache miss: %s (returned: %s)", name, type(v).__name__ if v is not None else "None", category="cycle")
             return None
 
         # Helper to recompute cycle state based on current time and activation time
@@ -566,7 +598,7 @@ class WarframeDatasourcePlugin(Star):
                         next_phase_end += cycle_duration
                     cycle_dict["expiry"] = next_phase_end
             except Exception as e:
-                logger.debug("cycle state recomputation failed for %s: %s", cycle_type, e)
+                log_debug("cycle state recomputation failed for %s: %s", cycle_type, e, category="cycle")
             return cycle_dict
 
         out: dict[str, dict] = {}
@@ -598,7 +630,7 @@ class WarframeDatasourcePlugin(Star):
             # keep both keys for compatibility
             out["duviriCycle"] = duviri
             out["duvalierCycle"] = duviri
-        logger.debug("_build_cycles_ws result: %d cycles loaded", len(out))
+        log_debug("_build_cycles_ws result: %d cycles loaded", len(out), category="cycle")
         return out
 
     def _normalize_warframestat_arbitration(self, data: dict) -> dict:
@@ -706,7 +738,7 @@ class WarframeDatasourcePlugin(Star):
                 continue
             if isinstance(data, dict):
                 return data
-        logger.debug("warframestat fetch failed: %s", endpoint, exc_info=True)
+        log_debug("warframestat fetch failed: %s", endpoint, exc_info=True, category="http")
         return None
 
     async def _get_extras_cache(self) -> dict[str, dict]:
@@ -1434,7 +1466,7 @@ class WarframeDatasourcePlugin(Star):
 
             if planet:
                 if not nodes_map:
-                    logger.debug("nodes map missing; skip planet filter for fissures display")
+                    log_debug("nodes map missing; skip planet filter for fissures display", category="main")
                     planet = None
                 else:
                     node_key = m.get("node") or m.get("location") or ""
@@ -1514,7 +1546,7 @@ class WarframeDatasourcePlugin(Star):
 
         obj = ws.get(key)
         if not isinstance(obj, dict):
-            logger.debug("cycle data missing for %s: obj=%s, ws keys=%s", key, obj, list(ws.keys()))
+            log_debug("cycle data missing for %s: obj=%s, ws keys=%s", key, obj, list(ws.keys()), category="cycle")
             return f"{key}: -"
 
         def state_of(o: dict) -> str:
@@ -1732,7 +1764,7 @@ class WarframeDatasourcePlugin(Star):
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("wf subscription tick loop error")
+                log_exception("wf subscription tick loop error", category="subscription")
             await asyncio.sleep(30.0)
 
     async def _run_pre_reminders_once(self) -> None:
@@ -2365,7 +2397,7 @@ class WarframeDatasourcePlugin(Star):
                 return
             yield event.plain_result(f"已清理图片缓存：{removed} 张")
         except Exception:
-            logger.exception("clear image cache failed")
+            log_exception("clear image cache failed", category="main")
             yield event.plain_result("清理失败（请查看控制台日志）")
 
     @wf_group.command("帮助", alias={"help", "h", "菜单", "指令", "命令"})
@@ -2707,7 +2739,7 @@ class WarframeDatasourcePlugin(Star):
             else:
                 yield event.plain_result("worldstate unavailable, use /wf 更新")
         except Exception:
-            logger.exception("wf_subscribe failed")
+            log_exception("wf_subscribe failed", category="subscription")
             yield event.plain_result("订阅处理失败，请查看控制台日志")
 
     @afilter.command("wf订阅", alias={"wfsub", "订阅wf"})
@@ -2880,7 +2912,7 @@ class WarframeDatasourcePlugin(Star):
                     try:
                         await setter("wf_push_enabled", True)
                     except Exception:
-                        logger.debug("save kv wf_push_enabled failed", exc_info=True)
+                        log_debug("save kv wf_push_enabled failed", exc_info=True, category="main")
                 yield event.plain_result("已开启全部推送")
                 return
             if a1 in {"关", "关闭", "off", "disable", "停用"}:
@@ -2890,7 +2922,7 @@ class WarframeDatasourcePlugin(Star):
                     try:
                         await setter("wf_push_enabled", False)
                     except Exception:
-                        logger.debug("save kv wf_push_enabled failed", exc_info=True)
+                        log_debug("save kv wf_push_enabled failed", exc_info=True, category="main")
                 yield event.plain_result("已关闭全部推送")
                 return
             if a1 in {"状态", "status", ""}:
@@ -2907,7 +2939,7 @@ class WarframeDatasourcePlugin(Star):
                     try:
                         await setter("wf_subscribe_enabled", True)
                     except Exception:
-                        logger.debug("save kv wf_subscribe_enabled failed", exc_info=True)
+                        log_debug("save kv wf_subscribe_enabled failed", exc_info=True, category="main")
                 yield event.plain_result("已开启订阅功能")
                 return
             if a1 in {"关", "关闭", "off", "disable", "停用"}:
@@ -2917,7 +2949,7 @@ class WarframeDatasourcePlugin(Star):
                     try:
                         await setter("wf_subscribe_enabled", False)
                     except Exception:
-                        logger.debug("save kv wf_subscribe_enabled failed", exc_info=True)
+                        log_debug("save kv wf_subscribe_enabled failed", exc_info=True, category="main")
                 yield event.plain_result("已关闭订阅功能")
                 return
             if a1 in {"状态", "status", ""}:

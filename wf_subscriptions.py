@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import aiofiles
-from astrbot.api import logger  # type: ignore
+from .wf_logging import debug as log_debug
 
 
 def _utcnow_iso() -> str:
@@ -39,7 +39,7 @@ class SubscriptionStore:
         except FileNotFoundError:
             return {"version": 2, "items": []}
         except Exception:
-            logger.debug("subscription store load failed: %s", self._path, exc_info=True)
+            log_debug("subscription store load failed: %s", self._path, exc_info=True, category="subscription")
             return {"version": 2, "items": []}
         if not isinstance(data, dict):
             return {"version": 2, "items": []}

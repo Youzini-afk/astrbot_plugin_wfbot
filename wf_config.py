@@ -22,6 +22,16 @@ class WarframeConfig:
     http_no_proxy_enabled: bool = True
     http_no_proxy_suffixes: tuple[str, ...] = ("warframe.com", "warframestat.us")
     http_proxy_url: str | None = None
+    log_enabled: bool = True
+    log_cycle_enabled: bool = True
+    log_http_enabled: bool = True
+    log_public_export_enabled: bool = True
+    log_subscription_enabled: bool = True
+    log_cache_enabled: bool = True
+    log_manager_enabled: bool = True
+    log_main_enabled: bool = True
+    log_cycle_fetch_failures: bool = True
+    log_cycle_fetch_success: bool = True
 
     # Data refresh intervals (seconds). Set to 0 to disable background refresh for that job.
     worldstate_refresh_interval: float = 600.0  # NyxBot: every 10 min

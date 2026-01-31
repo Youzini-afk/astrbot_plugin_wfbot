@@ -9,7 +9,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
-from astrbot.api import logger  # type: ignore
+from .wf_logging import debug as log_debug
+from .wf_logging import exception as log_exception
+from .wf_logging import info as log_info
+from .wf_logging import warning as log_warning
 
 from .wf_cache import FileCache
 from .wf_config import WarframeConfig
@@ -66,7 +69,7 @@ class WarframeDataManager:
             try:
                 self._store = SqliteStore(self._cfg.sqlite_path)
             except Exception as e:
-                logger.warning("sqlite disabled (%s); falling back to file store", e)
+                log_warning("sqlite disabled (%s); falling back to file store", e, category="manager")
                 self._store = None
         if self._store is None and self._cfg.enable_file_store:
             self._store = FileStore(self._cache.base_dir / "store")
@@ -304,18 +307,18 @@ class WarframeDataManager:
                     try:
                         resp = await self._ds.http.get(url)
                     except Exception as e:
-                        logger.debug("cycle worldstate fetch error: %s (%s)", url, e)
+                        log_debug("cycle worldstate fetch error: %s (%s)", url, e, category="cycle")
                         continue
                     if not (200 <= resp.status < 300):
-                        logger.debug("cycle worldstate status: %s (%s)", url, resp.status)
+                        log_debug("cycle worldstate status: %s (%s)", url, resp.status, category="cycle")
                         continue
                     try:
                         data = resp.json()
                     except Exception as e:
-                        logger.debug("cycle worldstate json parse failed: %s (%s)", url, e)
+                        log_debug("cycle worldstate json parse failed: %s (%s)", url, e, category="cycle")
                         continue
                     if not isinstance(data, dict) or "error" in data:
-                        logger.debug("cycle worldstate invalid payload: %s", url)
+                        log_debug("cycle worldstate invalid payload: %s", url, category="cycle")
                         continue
                     cycles: dict[str, dict] = {}
                     for key in ("earthCycle", "cetusCycle", "vallisCycle", "cambionCycle", "zarimanCycle", "duviriCycle"):
@@ -331,11 +334,13 @@ class WarframeDataManager:
             out: dict[str, Any] = {}
             missing: list[str] = []
             for ds in self._cycles:
-                logger.debug("fetching cycle: %s from %s", ds.name, ds.urls[0] if ds.urls else "?")
+                if self._cfg.log_cycle_enabled and self._cfg.log_cycle_fetch_success:
+                    log_debug("fetching cycle: %s from %s", ds.name, ds.urls[0] if ds.urls else "?", category="cycle")
                 result = await self._ds.mirrors.fetch_first_json(ds.urls, validate=_is_cycle_payload)
                 out[ds.name] = result.json
                 if result.json is None:
-                    logger.warning("cycle data fetch failed: %s (status=%s, url=%s)", ds.name, result.status, result.url)
+                    if self._cfg.log_cycle_enabled and self._cfg.log_cycle_fetch_failures:
+                        log_warning("cycle data fetch failed: %s (status=%s, url=%s)", ds.name, result.status, result.url, category="cycle")
                     missing.append(ds.name)
                     meta = {"fetched_at": _utcnow().isoformat(), "url": result.url, "status": result.status, "sha256": None}
                     await self._cache.write_json(meta, "mirrors", ds.name, "latest.meta.json")
@@ -344,7 +349,8 @@ class WarframeDataManager:
                 raw = await asyncio.to_thread(_json_bytes, result.json) if isinstance(result.json, (dict, list)) else str(result.json).encode("utf-8", errors="replace")
                 sha = await asyncio.to_thread(_sha256_hex, raw)
                 meta = {"fetched_at": _utcnow().isoformat(), "url": result.url, "status": result.status, "sha256": sha}
-                logger.debug("cycle data cached: %s (status=%s)", ds.name, result.status)
+                if self._cfg.log_cycle_enabled and self._cfg.log_cycle_fetch_success:
+                    log_debug("cycle data cached: %s (status=%s)", ds.name, result.status, category="cycle")
                 await self._cache.write_json(result.json, "mirrors", ds.name, "latest.json")
                 await self._cache.write_json(meta, "mirrors", ds.name, "latest.meta.json")
 
@@ -401,7 +407,7 @@ class WarframeDataManager:
                                     next_phase_end += cycle_duration
                                 cycle_dict["expiry"] = next_phase_end
                         except Exception as e:
-                            logger.debug("cycle state computation failed for %s: %s", cycle_type, e)
+                            log_debug("cycle state computation failed for %s: %s", cycle_type, e, category="cycle")
                         return cycle_dict
                     
                     for ds_name in list(missing):
@@ -418,7 +424,8 @@ class WarframeDataManager:
                             await self._cache.write_json(meta, "mirrors", ds_name, "latest.meta.json")
                             out[ds_name] = v
                             recovered = True
-                            logger.info("cycle data recovered from cached worldstate: %s", ds_name)
+                            if self._cfg.log_cycle_enabled and self._cfg.log_cycle_fetch_success:
+                                log_info("cycle data recovered from cached worldstate: %s", ds_name, category="cycle")
                     if recovered:
                         missing = [n for n in missing if n not in out]
 
@@ -436,9 +443,11 @@ class WarframeDataManager:
                         await self._cache.write_json(v, "mirrors", ds_name, "latest.json")
                         await self._cache.write_json(meta, "mirrors", ds_name, "latest.meta.json")
                         out[ds_name] = v
-                        logger.info("cycle data recovered from worldstate: %s", ds_name)
+                        if self._cfg.log_cycle_enabled and self._cfg.log_cycle_fetch_success:
+                        log_info("cycle data recovered from worldstate: %s", ds_name, category="cycle")
                 else:
-                    logger.warning("cycle worldstate fallback failed; missing=%s", missing)
+                    if self._cfg.log_cycle_enabled and self._cfg.log_cycle_fetch_failures:
+                        log_warning("cycle worldstate fallback failed; missing=%s", missing, category="cycle")
             return out
 
     async def refresh_market_bootstrap(self) -> dict[str, int]:
@@ -515,29 +524,29 @@ class WarframeDataManager:
         try:
             await self.refresh_worldstate(snapshot=True)
         except Exception:
-            logger.exception("refresh_worldstate failed")
+            log_exception("refresh_worldstate failed", category="manager")
 
         try:
             await self.refresh_public_export()
         except Exception:
-            logger.exception("refresh_public_export failed")
+            log_exception("refresh_public_export failed", category="manager")
 
         try:
-            logger.info("starting refresh_cycles...")
+            log_info("starting refresh_cycles...", category="cycle")
             result = await self.refresh_cycles()
-            logger.info("refresh_cycles completed: %s", {k: (type(v).__name__ if v is not None else "None") for k, v in result.items()})
+            log_info("refresh_cycles completed: %s", {k: (type(v).__name__ if v is not None else "None") for k, v in result.items()}, category="cycle")
         except Exception:
-            logger.exception("refresh_cycles failed")
+            log_exception("refresh_cycles failed", category="cycle")
 
         try:
             await self.refresh_mirrors()
         except Exception:
-            logger.exception("refresh_mirrors failed")
+            log_exception("refresh_mirrors failed", category="manager")
 
         try:
             await self.refresh_market_bootstrap()
         except Exception:
-            logger.exception("refresh_market_bootstrap failed")
+            log_exception("refresh_market_bootstrap failed", category="manager")
 
         await self.cleanup_async()
 
@@ -579,7 +588,7 @@ class WarframeDataManager:
                     await self.cleanup_async()
                     next_cleanup = now + 6 * 3600.0
             except Exception:
-                logger.exception("warframe data manager loop error")
+                log_exception("warframe data manager loop error", category="manager")
 
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)

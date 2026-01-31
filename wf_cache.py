@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 import aiofiles
-from astrbot.api import logger  # type: ignore
+from .wf_logging import debug as log_debug
+from .wf_logging import error as log_error
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,7 @@ class FileCache:
             async with aiofiles.open(p, "wb") as f:
                 await f.write(data)
         except OSError:
-            logger.error("file cache write failed: %s", p, exc_info=True)
+            log_error("file cache write failed: %s", p, exc_info=True, category="cache")
             raise
         return p
 
@@ -43,7 +44,7 @@ class FileCache:
         try:
             return json.loads(data.decode("utf-8", errors="replace"))
         except Exception:
-            logger.debug("file cache json decode failed: %s", self.path(*parts), exc_info=True)
+            log_debug("file cache json decode failed: %s", self.path(*parts), exc_info=True, category="cache")
             return None
 
     async def write_json(self, obj: Any, *parts: str) -> Path:

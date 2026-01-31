@@ -98,6 +98,17 @@
 - `subscriptions.notify_mode_default`：订阅通知策略默认值（`change` / `new_only`）
 - `subscriptions.notify_modes.<类型>`：按类型覆盖通知策略（如 `alerts` / `fissures` / `void_trader`）
 - `i18n.simplify_zh`：将繁体中文转换为简体（默认开启，主要用于 solNodes 等第三方数据源）
+- `log.enabled`：日志总开关（关闭后屏蔽本插件所有日志）
+- `log.main_enabled`：主流程日志
+- `log.manager_enabled`：数据刷新/后台循环日志
+- `log.http_enabled`：网络请求相关日志
+- `log.public_export_enabled`：PublicExport 下载相关日志
+- `log.cache_enabled`：缓存读写相关日志
+- `log.subscription_enabled`：订阅存储/推送相关日志
+- `log.cycle_enabled`：cycles 日志总开关
+- `log.cycle_fetch_failures`：是否输出 cycles 拉取失败的 WARN 日志
+- `log.cycle_fetch_success`：是否输出 cycles 拉取成功/回退的 INFO/DEBUG 日志
+- 兼容：旧的顶层 `log_*` 配置仍可使用，但已隐藏，建议迁移到 `log.*`
 - `admin.group_admins`：按群配置管理员（键=群号，值=QQ号列表）
 - `admin.session_admins`：按会话配置管理员（高级，需 unified_msg_origin）
 - 配置为列表格式：`[{ "group_id": "123456", "admins": ["111","222"] }]`
@@ -119,6 +130,7 @@
   - cycles 回退补全地球周期，减少回退缺失。
   - 直连失败时可回退代理请求（若配置了代理/系统代理）。
   - `no_proxy_suffixes` 默认加入 `warframestat.us`。
+  - 日志配置迁移到 `log.*`，新增日志总开关与子模块细分开关（兼容旧 `log_*`）。
 
 ## 致谢
 

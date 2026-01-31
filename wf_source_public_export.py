@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from astrbot.api import logger  # type: ignore
+from .wf_logging import debug as log_debug
+from .wf_logging import warning as log_warning
 import aiofiles
 import aiohttp
 
@@ -142,7 +143,7 @@ class PublicExportClient:
         except Exception as e:
             last_error = e
         if last_error:
-            logger.debug("public export index fetch error: %s", last_error)
+            log_debug("public export index fetch error: %s", last_error, category="public_export")
         return None, last_status
 
     async def update(self, *, language: str = "zh") -> PublicExportUpdateResult:
@@ -156,13 +157,13 @@ class PublicExportClient:
         for attempt in range(2):
             raw_bytes, last_status = await self._fetch_index_bytes(language=language, attempt=attempt)
             if raw_bytes is None:
-                logger.debug("public export index fetch failed (attempt=%s, status=%s)", attempt + 1, last_status)
+                log_debug("public export index fetch failed (attempt=%s, status=%s)", attempt + 1, last_status, category="public_export")
                 continue
             try:
                 decompressed = await asyncio.to_thread(lzma.decompress, raw_bytes)
                 break
             except lzma.LZMAError as e:
-                logger.debug("public export index decompress failed (attempt=%s): %s", attempt + 1, e)
+                log_debug("public export index decompress failed (attempt=%s): %s", attempt + 1, e, category="public_export")
                 raw_bytes = None
                 decompressed = None
 
@@ -175,9 +176,9 @@ class PublicExportClient:
                     if cached_raw and len(cached_raw) >= 32:
                         decompressed = await asyncio.to_thread(lzma.decompress, cached_raw)
                         raw_bytes = cached_raw
-                        logger.debug("using cached public export index")
+                        log_debug("using cached public export index", category="public_export")
             except Exception as e:
-                logger.debug("public export cached index decompress failed: %s", e)
+                log_debug("public export cached index decompress failed: %s", e, category="public_export")
         if decompressed is None:
             return PublicExportUpdateResult(
                 language=language,
@@ -229,14 +230,14 @@ class PublicExportClient:
 
             filename = _sanitize_export_filename(filename_raw)
             if not filename:
-                logger.warning("skip suspicious public export filename: %s", filename_raw)
+                log_warning("skip suspicious public export filename: %s", filename_raw, category="public_export")
                 continue
 
             out_path = (export_dir / filename).resolve()
             try:
                 out_path.relative_to(export_root)
             except ValueError:
-                logger.warning("skip public export path traversal: %s", filename_raw)
+                log_warning("skip public export path traversal: %s", filename_raw, category="public_export")
                 continue
 
             manifest_url = PUBLIC_EXPORT_MANIFEST_URL % line
@@ -253,4 +254,3 @@ class PublicExportClient:
 
     def export_path(self, filename: str) -> Path:
         return self._cache.path("public_export", "export", filename)
-

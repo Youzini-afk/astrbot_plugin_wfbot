@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 import aiofiles
-from astrbot.api import logger  # type: ignore
+from .wf_logging import debug as log_debug
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,7 @@ class HttpClient:
             try:
                 await s.close()
             except Exception:
-                logger.debug("http session close failed", exc_info=True)
+                log_debug("http session close failed", exc_info=True, category="http")
 
     async def get(self, url: str, *, headers: Mapping[str, str] | None = None) -> HttpResponse:
         request_headers: MutableMapping[str, str] = {
@@ -124,12 +124,13 @@ class HttpClient:
                         )
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                     last_exc = e
-                    logger.debug(
+                    log_debug(
                         "http request failed (attempt=%s, proxy=%s): %s",
                         attempt,
                         "yes" if force_proxy else "no",
                         url,
                         exc_info=True,
+                        category="http",
                     )
                     # If direct failed and proxy is available, try proxy fallback in this attempt.
                     continue

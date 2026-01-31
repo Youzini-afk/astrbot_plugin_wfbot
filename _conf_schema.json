@@ -66,6 +66,72 @@
       }
     }
   },
+  "log": {
+    "type": "object",
+    "description": "日志开关",
+    "items": {
+      "enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "日志总开关",
+        "hint": "关闭后将屏蔽本插件所有日志输出。"
+      },
+      "main_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "主流程日志",
+        "hint": "控制插件主流程/指令相关日志。"
+      },
+      "manager_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "数据管理日志",
+        "hint": "控制数据刷新与后台循环相关日志。"
+      },
+      "http_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "HTTP 日志",
+        "hint": "控制网络请求与代理回退相关日志。"
+      },
+      "public_export_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "PublicExport 日志",
+        "hint": "控制 PublicExport 下载/解压相关日志。"
+      },
+      "cache_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "缓存日志",
+        "hint": "控制缓存读写相关日志。"
+      },
+      "subscription_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "订阅日志",
+        "hint": "控制订阅存储/推送相关日志。"
+      },
+      "cycle_enabled": {
+        "type": "bool",
+        "default": true,
+        "description": "cycles 日志总开关",
+        "hint": "关闭后将屏蔽所有 cycles 相关日志（成功/失败/回退）。"
+      },
+      "cycle_fetch_failures": {
+        "type": "bool",
+        "default": true,
+        "description": "记录 cycles 拉取失败日志",
+        "hint": "关闭后将不再输出 cycle_* fetch failed 的 WARN 日志。"
+      },
+      "cycle_fetch_success": {
+        "type": "bool",
+        "default": true,
+        "description": "记录 cycles 拉取成功与回退日志",
+        "hint": "关闭后将不再输出 cycles 拉取/回退的 INFO/DEBUG 日志。"
+      }
+    }
+  },
   "retention": {
     "type": "object",
     "description": "存储与清理",
@@ -349,6 +415,66 @@
     "type": "int",
     "default": 10,
     "description": "(deprecated) use render.keep_images",
+    "invisible": true
+  },
+  "log_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "(deprecated) use log.enabled",
+    "invisible": true
+  },
+  "log_main_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "(deprecated) use log.main_enabled",
+    "invisible": true
+  },
+  "log_manager_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "(deprecated) use log.manager_enabled",
+    "invisible": true
+  },
+  "log_http_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "(deprecated) use log.http_enabled",
+    "invisible": true
+  },
+  "log_public_export_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "(deprecated) use log.public_export_enabled",
+    "invisible": true
+  },
+  "log_cache_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "(deprecated) use log.cache_enabled",
+    "invisible": true
+  },
+  "log_subscription_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "(deprecated) use log.subscription_enabled",
+    "invisible": true
+  },
+  "log_cycle_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "(deprecated) use log.cycle_enabled",
+    "invisible": true
+  },
+  "log_cycle_fetch_failures": {
+    "type": "bool",
+    "default": true,
+    "description": "(deprecated) use log.cycle_fetch_failures",
+    "invisible": true
+  },
+  "log_cycle_fetch_success": {
+    "type": "bool",
+    "default": true,
+    "description": "(deprecated) use log.cycle_fetch_success",
     "invisible": true
   }
 }
