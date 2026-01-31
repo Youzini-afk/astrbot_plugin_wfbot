@@ -13,12 +13,28 @@ def _get_opencc():
         return None
 
 
+@lru_cache(maxsize=1)
+def _get_zhconv():
+    try:
+        import zhconv  # type: ignore
+
+        return zhconv
+    except Exception:
+        return None
+
+
 def to_simplified_zh(text: str) -> str:
     if not text:
         return text
     cc = _get_opencc()
     if cc is None:
-        return text
+        zc = _get_zhconv()
+        if zc is None:
+            return text
+        try:
+            return zc.convert(text, "zh-cn")
+        except Exception:
+            return text
     try:
         return cc.convert(text)
     except Exception:

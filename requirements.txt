@@ -2,3 +2,4 @@ aiohttp>=3.9.0
 Pillow>=10.0.0
 opencc-python-reimplemented>=0.1.7
 aiofiles>=23.2.1
+zhconv>=1.4.3

@@ -785,6 +785,8 @@ class WarframeDatasourcePlugin(Star):
                     name = it.get("name") or it.get("itemName") or it.get("productName") or it.get("fullName") or it.get("title")
                     if not isinstance(unique, str) or not unique or not isinstance(name, str) or not name:
                         continue
+                    if self._simplify_zh:
+                        name = to_simplified_zh(name)
                     if unique not in mapping:
                         mapping[unique] = name
                     for n in (3, 4):
