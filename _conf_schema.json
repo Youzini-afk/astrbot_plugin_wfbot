@@ -60,7 +60,7 @@
       },
       "no_proxy_suffixes": {
         "type": "list",
-        "default": ["warframe.com"],
+        "default": ["warframe.com", "warframestat.us"],
         "description": "直连域名后缀列表",
         "hint": "仅在开启“禁用系统代理”时生效；命中后缀的域名将直连（不使用系统代理）。"
       }

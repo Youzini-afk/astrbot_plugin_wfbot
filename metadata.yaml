@@ -1,5 +1,5 @@
 name: "astrbot_plugin_wfbot"
-version: "1.1.0"
+version: "1.6.0"
 author: "Youzini"
 desc: "Warframe 数据层（世界状态/PublicExport/多镜像/market），支持缓存、清理与定时刷新"
 repo: "https://github.com/Youzini-afk/astrbot_plugin_wfbot"

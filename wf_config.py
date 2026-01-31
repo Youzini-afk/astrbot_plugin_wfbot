@@ -20,7 +20,7 @@ class WarframeConfig:
     retry_backoff_seconds: float = 2.0
     http_max_request_time_seconds: float | None = 30.0
     http_no_proxy_enabled: bool = True
-    http_no_proxy_suffixes: tuple[str, ...] = ("warframe.com",)
+    http_no_proxy_suffixes: tuple[str, ...] = ("warframe.com", "warframestat.us")
     http_proxy_url: str | None = None
 
     # Data refresh intervals (seconds). Set to 0 to disable background refresh for that job.

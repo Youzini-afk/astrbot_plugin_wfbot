@@ -42,7 +42,7 @@ FACTION_ZH: dict[str, str] = {
 FISSURE_TIER_ZH: dict[str, str] = {
     "VoidT1": "古纪",
     "VoidT2": "中纪",
-    "VoidT3": "新纪",
+    "VoidT3": "前纪",
     "VoidT4": "后纪",
     "VoidT5": "安魂",
     "VoidT6": "全能",
@@ -232,11 +232,21 @@ def _fmt_remaining(ts: Any) -> str:
     if isinstance(ts, (int, float)):
         secs = float(ts) - now
     elif isinstance(ts, str) and ts:
-        s = ts.replace("Z", "+00:00")
-        try:
-            secs = datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp() - now
-        except Exception:
-            secs = None
+        s = ts.strip()
+        if s.isdigit():
+            try:
+                v = float(s)
+                if v > 1e12:
+                    v = v / 1000.0
+                secs = v - now
+            except Exception:
+                secs = None
+        else:
+            s = s.replace("Z", "+00:00")
+            try:
+                secs = datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp() - now
+            except Exception:
+                secs = None
     if secs is None:
         return "-"
     if secs <= 0:
@@ -255,10 +265,12 @@ def _cycle_state(zone: str, obj: dict) -> str:
     st = obj.get("state")
     if isinstance(st, str) and st:
         return st.strip().lower()
-    if zone in {"earth", "cetus"} and "isDay" in obj:
-        return "day" if bool(obj.get("isDay")) else "night"
-    if zone == "vallis" and "isWarm" in obj:
-        return "warm" if bool(obj.get("isWarm")) else "cold"
+    if zone in {"earth", "cetus"} and ("isDay" in obj or "isday" in obj):
+        flag = obj.get("isDay") if "isDay" in obj else obj.get("isday")
+        return "day" if bool(flag) else "night"
+    if zone == "vallis" and ("isWarm" in obj or "iswarm" in obj):
+        flag = obj.get("isWarm") if "isWarm" in obj else obj.get("iswarm")
+        return "warm" if bool(flag) else "cold"
     return "-"
 
 
@@ -366,7 +378,11 @@ def format_cycles(ws: dict) -> str:
             continue
         st = _cycle_state(zone, v)
         title, st_label = _cycle_label(zone, st)
-        eta = _fmt_remaining(v.get("expiry"))
+        tl = v.get("timeLeft")
+        if isinstance(tl, str) and tl.strip():
+            eta = tl.strip()
+        else:
+            eta = _fmt_remaining(v.get("expiry") or v.get("expiration") or v.get("expiryDate") or v.get("endTime"))
         lines.append(f"- {title}｜{st_label}｜⏳{eta}")
     return "\n".join(lines)
 
@@ -558,7 +574,11 @@ def format_duviri_cycle(ws: dict) -> str:
         return "🎭 双衍王境：-"
     st = _cycle_state("duviri", d)
     _, st_label = _cycle_label("duviri", st)
-    eta = _fmt_remaining(d.get("expiry"))
+    tl = d.get("timeLeft")
+    if isinstance(tl, str) and tl.strip():
+        eta = tl.strip()
+    else:
+        eta = _fmt_remaining(d.get("expiry") or d.get("expiration") or d.get("expiryDate") or d.get("endTime"))
     return f"🎭 双衍王境｜{st_label}｜⏳{eta}"
 
 

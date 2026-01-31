@@ -126,6 +126,9 @@ class WarframeDatasourcePlugin(Star):
         self._pex_translation_cache: dict[str, str] = {}
         self._pex_translation_cache_at: float | None = None
         self._pex_translation_cache_ttl = 21600.0
+        self._nodes_map_cache: dict[str, str] | None = None
+        self._nodes_map_cache_at: float | None = None
+        self._nodes_map_cache_ttl = 600.0
 
         self._task: asyncio.Task | None = None
         try:
@@ -163,7 +166,7 @@ class WarframeDatasourcePlugin(Star):
         except Exception:
             max_req_time_f = 30.0
 
-        no_proxy_suffixes_raw = http_cfg.get("no_proxy_suffixes", ["warframe.com"])
+        no_proxy_suffixes_raw = http_cfg.get("no_proxy_suffixes", ["warframe.com", "warframestat.us"])
         if isinstance(no_proxy_suffixes_raw, list):
             no_proxy_suffixes = tuple(str(x).strip() for x in no_proxy_suffixes_raw if str(x).strip())
         else:
@@ -496,12 +499,75 @@ class WarframeDatasourcePlugin(Star):
                 nodes.setdefault(k, v)
         if self._simplify_zh and nodes:
             nodes = {k: to_simplified_zh(v) for k, v in nodes.items() if isinstance(v, str)}
+        self._nodes_map_cache = dict(nodes) if nodes else {}
+        self._nodes_map_cache_at = time.monotonic()
         return nodes
+
+    def _get_nodes_map_cache(self) -> dict[str, str]:
+        if self._nodes_map_cache is None:
+            return {}
+        if self._nodes_map_cache_at is not None:
+            if (time.monotonic() - self._nodes_map_cache_at) > self._nodes_map_cache_ttl:
+                return {}
+        return dict(self._nodes_map_cache)
 
     async def _build_cycles_ws(self) -> dict[str, dict]:
         async def get(name: str) -> dict | None:
             v = await self.mgr.get_mirror_cached(name)
-            return v if isinstance(v, dict) else None
+            if v is not None and isinstance(v, dict):
+                return v
+            # If cache is empty, return None (don't trigger refresh here to avoid cascading calls)
+            logger.debug("cycle cache miss: %s (returned: %s)", name, type(v).__name__ if v is not None else "None")
+            return None
+
+        # Helper to recompute cycle state based on current time and activation time
+        def _recompute_cycle_state(cycle_dict: dict | None, cycle_type: str) -> dict | None:
+            if not isinstance(cycle_dict, dict):
+                return cycle_dict
+            activation = cycle_dict.get("activation")
+            if activation is None:
+                return cycle_dict
+            try:
+                import time
+                now_ts = time.time()
+                activation_ts = float(activation)
+                cycle_dict = dict(cycle_dict)  # Make a copy to avoid modifying cached data
+                
+                if cycle_type == "cetus":
+                    cycle_duration = 150 * 60  # 150 min
+                    phase_duration = 100 * 60  # 100 min day
+                    elapsed = (now_ts - activation_ts) % cycle_duration
+                    is_day = elapsed < phase_duration
+                    cycle_dict["state"] = "day" if is_day else "night"
+                    cycle_dict["isDay"] = is_day
+                    next_phase_end = activation_ts + (((int(elapsed / phase_duration) + 1) * phase_duration) if is_day else cycle_duration)
+                    if next_phase_end <= now_ts:
+                        next_phase_end += cycle_duration
+                    cycle_dict["expiry"] = next_phase_end
+                elif cycle_type == "vallis":
+                    cycle_duration = 160 * 60  # 160 min
+                    phase_duration = 80 * 60   # 80 min warm
+                    elapsed = (now_ts - activation_ts) % cycle_duration
+                    is_warm = elapsed < phase_duration
+                    cycle_dict["state"] = "warm" if is_warm else "cold"
+                    cycle_dict["isWarm"] = is_warm
+                    next_phase_end = activation_ts + (((int(elapsed / phase_duration) + 1) * phase_duration) if is_warm else cycle_duration)
+                    if next_phase_end <= now_ts:
+                        next_phase_end += cycle_duration
+                    cycle_dict["expiry"] = next_phase_end
+                elif cycle_type == "cambion":
+                    cycle_duration = 150 * 60  # 150 min
+                    phase_duration = 75 * 60   # 75 min Fass
+                    elapsed = (now_ts - activation_ts) % cycle_duration
+                    is_fass = elapsed < phase_duration
+                    cycle_dict["state"] = "fass" if is_fass else "vome"
+                    next_phase_end = activation_ts + (((int(elapsed / phase_duration) + 1) * phase_duration) if is_fass else cycle_duration)
+                    if next_phase_end <= now_ts:
+                        next_phase_end += cycle_duration
+                    cycle_dict["expiry"] = next_phase_end
+            except Exception as e:
+                logger.debug("cycle state recomputation failed for %s: %s", cycle_type, e)
+            return cycle_dict
 
         out: dict[str, dict] = {}
         earth = await get("cycle_earth")
@@ -510,6 +576,14 @@ class WarframeDatasourcePlugin(Star):
         cambion = await get("cycle_cambion")
         zariman = await get("cycle_zariman")
         duviri = await get("cycle_duviri")
+        
+        # Recompute cycle states based on current time
+        earth = _recompute_cycle_state(earth, "earth")
+        cetus = _recompute_cycle_state(cetus, "cetus")
+        vallis = _recompute_cycle_state(vallis, "vallis")
+        cambion = _recompute_cycle_state(cambion, "cambion")
+        # zariman and duviri don't have simple day/night calculations, so we leave them as-is
+        
         if earth:
             out["earthCycle"] = earth
         if cetus:
@@ -524,6 +598,7 @@ class WarframeDatasourcePlugin(Star):
             # keep both keys for compatibility
             out["duviriCycle"] = duviri
             out["duvalierCycle"] = duviri
+        logger.debug("_build_cycles_ws result: %d cycles loaded", len(out))
         return out
 
     def _normalize_warframestat_arbitration(self, data: dict) -> dict:
@@ -880,6 +955,89 @@ class WarframeDatasourcePlugin(Star):
             return "requiem"
         return None
 
+    def _normalize_planet_token(self, raw: str) -> str | None:
+        s = self._norm_token(raw)
+        if not s:
+            return None
+        mapping = {
+            "mercury": {"mercury", "水星"},
+            "venus": {"venus", "金星"},
+            "earth": {"earth", "地球"},
+            "mars": {"mars", "火星"},
+            "phobos": {"phobos", "火卫一"},
+            "deimos": {"deimos", "火卫二", "殁世", "殁世幽都", "魔胎之境", "cambion"},
+            "ceres": {"ceres", "谷神星"},
+            "jupiter": {"jupiter", "木星"},
+            "europa": {"europa", "木卫二"},
+            "saturn": {"saturn", "土星"},
+            "uranus": {"uranus", "天王星"},
+            "neptune": {"neptune", "海王星"},
+            "pluto": {"pluto", "冥王星"},
+            "eris": {"eris", "阋神星"},
+            "sedna": {"sedna", "塞德娜"},
+            "lua": {"lua", "月球"},
+            "void": {"void", "虚空"},
+            "zariman": {"zariman", "扎里曼"},
+            "duviri": {"duviri", "双衍王境", "轮换"},
+        }
+        for key, names in mapping.items():
+            if s in {self._norm_token(x) for x in names}:
+                return key
+        return None
+
+    def _planet_label(self, key: str) -> str:
+        return {
+            "mercury": "水星",
+            "venus": "金星",
+            "earth": "地球",
+            "mars": "火星",
+            "phobos": "火卫一",
+            "deimos": "火卫二",
+            "ceres": "谷神星",
+            "jupiter": "木星",
+            "europa": "木卫二",
+            "saturn": "土星",
+            "uranus": "天王星",
+            "neptune": "海王星",
+            "pluto": "冥王星",
+            "eris": "阋神星",
+            "sedna": "塞德娜",
+            "lua": "月球",
+            "void": "虚空",
+            "zariman": "扎里曼",
+            "duviri": "双衍王境",
+        }.get(key, key)
+
+    def _node_planet_key(self, node: str | None, nodes_map: dict[str, str] | None) -> str | None:
+        raw = str(node or "").strip()
+        candidates = []
+        if nodes_map and raw in nodes_map:
+            candidates.append(nodes_map.get(raw))
+        candidates.append(raw)
+        for cand in candidates:
+            if not isinstance(cand, str) or not cand.strip():
+                continue
+            s = cand.strip()
+            if "(" in s and ")" in s:
+                inner = s.rsplit("(", 1)[1].split(")", 1)[0].strip()
+                key = self._normalize_planet_token(inner)
+                if key:
+                    return key
+            if "/" in s:
+                inner = s.split("/", 1)[0].strip()
+                key = self._normalize_planet_token(inner)
+                if key:
+                    return key
+            if " - " in s:
+                inner = s.split(" - ", 1)[0].strip()
+                key = self._normalize_planet_token(inner)
+                if key:
+                    return key
+            key = self._normalize_planet_token(s)
+            if key:
+                return key
+        return None
+
     def _normalize_mission_type_token(self, raw: str) -> str | None:
         s = self._norm_token(raw)
         mapping = {
@@ -1049,6 +1207,10 @@ class WarframeDatasourcePlugin(Star):
                 if tier:
                     filters["tier"] = tier
                     continue
+                planet = self._normalize_planet_token(a)
+                if planet:
+                    filters["planet"] = planet
+                    continue
                 mt = self._normalize_mission_type_token(a)
                 if mt:
                     filters["mission"] = mt
@@ -1063,6 +1225,10 @@ class WarframeDatasourcePlugin(Star):
                 tier = self._normalize_relic_tier_token(a)
                 if tier:
                     filters["tier"] = tier
+                    continue
+                planet = self._normalize_planet_token(a)
+                if planet:
+                    filters["planet"] = planet
                     continue
                 mt = self._normalize_mission_type_token(a)
                 if mt:
@@ -1151,6 +1317,9 @@ class WarframeDatasourcePlugin(Star):
         tier = (filters.get("tier") or "").lower()
         if tier:
             extra.append({"lith": "古纪", "meso": "中纪", "neo": "新纪", "axi": "后纪", "requiem": "安魂"}.get(tier, tier))
+        planet = (filters.get("planet") or "").lower()
+        if planet:
+            extra.append(self._planet_label(planet))
         mission = (filters.get("mission") or "").lower()
         if mission:
             extra.append(
@@ -1185,8 +1354,9 @@ class WarframeDatasourcePlugin(Star):
             kind = (filters.get("kind") or "normal").lower()
             tier = (filters.get("tier") or "").lower() or None
             mission = (filters.get("mission") or "").lower() or None
+            planet = (filters.get("planet") or "").lower() or None
             title = self._topic_label(topic)
-            msg = self._format_fissures_filtered(ws, nodes_map=nodes, kind=kind, tier=tier, mission=mission)
+            msg = self._format_fissures_filtered(ws, nodes_map=nodes, kind=kind, tier=tier, mission=mission, planet=planet)
             return title, msg
         if base == "void_trader":
             ws = await self._merge_extras_ws(ws)
@@ -1229,6 +1399,7 @@ class WarframeDatasourcePlugin(Star):
         kind: str,
         tier: str | None,
         mission: str | None,
+        planet: str | None,
         limit: int = 10,
     ) -> str:
         if kind == "storm":
@@ -1261,6 +1432,16 @@ class WarframeDatasourcePlugin(Star):
                 if not mt_key or mt_key != mission.lower():
                     continue
 
+            if planet:
+                if not nodes_map:
+                    logger.debug("nodes map missing; skip planet filter for fissures display")
+                    planet = None
+                else:
+                    node_key = m.get("node") or m.get("location") or ""
+                    p_key = self._node_planet_key(node_key, nodes_map)
+                    if not p_key or p_key != planet.lower():
+                        continue
+
             out.append(m)
 
         title = {"normal": "普通", "steel": "钢铁", "storm": "九重天"}.get(kind, kind)
@@ -1283,6 +1464,8 @@ class WarframeDatasourcePlugin(Star):
             )
         if tier:
             filter_bits.append({"lith": "古纪", "meso": "中纪", "neo": "新纪", "axi": "后纪", "requiem": "安魂"}.get(tier, tier))
+        if planet:
+            filter_bits.append(self._planet_label(planet))
         head = f"🌀 裂缝·{title}（{len(out)}）"
         if filter_bits:
             head = head + "｜过滤：" + " ".join(filter_bits)
@@ -1331,6 +1514,7 @@ class WarframeDatasourcePlugin(Star):
 
         obj = ws.get(key)
         if not isinstance(obj, dict):
+            logger.debug("cycle data missing for %s: obj=%s, ws keys=%s", key, obj, list(ws.keys()))
             return f"{key}: -"
 
         def state_of(o: dict) -> str:
@@ -1344,18 +1528,22 @@ class WarframeDatasourcePlugin(Star):
             return "-"
 
         st = state_of(obj)
-        exp_raw = obj.get("expiry") or obj.get("endTime")
-        exp_ts = self._parse_expiry_ts(exp_raw)
-        now_ts = datetime.now(timezone.utc).timestamp()
-        delta = (exp_ts - now_ts) if exp_ts is not None else None
-
-        def fmt_delta(d: float | None) -> str:
-            if d is None:
-                tl = obj.get("timeLeft")
-                return str(tl) if tl else "-"
-            if d <= 0:
+        
+        def fmt_delta() -> str:
+            # Try to use timeLeft first (WarframeStat pre-formatted string)
+            tl = obj.get("timeLeft")
+            if isinstance(tl, str) and tl.strip():
+                return str(tl).strip()
+            # Fallback: compute from expiry timestamp
+            exp_raw = obj.get("expiry") or obj.get("endTime") or obj.get("expiryDate") or obj.get("expiration")
+            exp_ts = self._parse_expiry_ts(exp_raw)
+            if exp_ts is None:
+                return "-"
+            now_ts = datetime.now(timezone.utc).timestamp()
+            delta = exp_ts - now_ts
+            if delta <= 0:
                 return "已结束"
-            minutes = int(d // 60)
+            minutes = int(delta // 60)
             if minutes < 60:
                 return f"{minutes}分"
             hours = minutes // 60
@@ -1386,15 +1574,16 @@ class WarframeDatasourcePlugin(Star):
 
         title = zone_title(zone)
         cur = state_label(zone, st)
+        eta_str = fmt_delta()
 
         if not desired_state:
-            return f"{title}｜当前：{cur}｜⏳{fmt_delta(delta)}"
+            return f"{title}｜当前：{cur}｜⏳{eta_str}"
 
         des = state_label(zone, desired_state)
         if st == desired_state:
             return f"{title}｜当前：{cur}（已达成）"
 
-        return f"{title}｜当前：{cur}｜距离{des}：⏳{fmt_delta(delta)}"
+        return f"{title}｜当前：{cur}｜距离{des}：⏳{eta_str}"
 
     def _parse_expiry_ts(self, expiry) -> float | None:
         if expiry is None:
@@ -1408,6 +1597,11 @@ class WarframeDatasourcePlugin(Star):
             s = expiry.strip()
             if not s:
                 return None
+            if s.isdigit():
+                v = float(s)
+                if v > 1e12:
+                    v = v / 1000.0
+                return v
             s = s.replace("Z", "+00:00")
             try:
                 dt = datetime.fromisoformat(s)
@@ -1488,7 +1682,8 @@ class WarframeDatasourcePlugin(Star):
         else:
             cur = ""
 
-        exp_ts = self._parse_expiry_ts(obj.get("expiry") or obj.get("endTime"))
+        exp_ts = self._parse_expiry_ts(obj.get("expiry") or obj.get("endTime") or obj.get("expiryDate") or obj.get("expiration"))
+        # If expiry parsing failed, try to fallback (though pre-reminder without expiry won't work well)
         if exp_ts is None:
             return None
         now_ts = datetime.now(timezone.utc).timestamp()
@@ -1613,7 +1808,9 @@ class WarframeDatasourcePlugin(Star):
         kind = (filters.get("kind") or "normal").lower()
         tier = (filters.get("tier") or "").lower() or None
         mission = (filters.get("mission") or "").lower() or None
-        return self._collect_fissure_ids(ws, kind=kind, tier=tier, mission=mission)
+        planet = (filters.get("planet") or "").lower() or None
+        nodes_map = self._get_nodes_map_cache()
+        return self._collect_fissure_ids(ws, kind=kind, tier=tier, mission=mission, planet=planet, nodes_map=nodes_map)
 
     def _alert_ids_for_topic(self, ws: dict) -> list[str]:
         alerts = ws.get("alerts", [])
@@ -1755,7 +1952,16 @@ class WarframeDatasourcePlugin(Star):
             return self._steel_path_ids_for_topic(ws)
         return None
 
-    def _collect_fissure_ids(self, ws: dict, *, kind: str, tier: str | None, mission: str | None) -> list[str]:
+    def _collect_fissure_ids(
+        self,
+        ws: dict,
+        *,
+        kind: str,
+        tier: str | None,
+        mission: str | None,
+        planet: str | None,
+        nodes_map: dict[str, str] | None,
+    ) -> list[str]:
         fiss = ws.get("voidStorms" if kind == "storm" else "activeMissions", [])
         if not isinstance(fiss, list):
             return []
@@ -1778,6 +1984,15 @@ class WarframeDatasourcePlugin(Star):
                 mt_key = self._mission_key_from_code(mt_code)
                 if not mt_key or mt_key != mission.lower():
                     continue
+            if planet:
+                if not nodes_map:
+                    # Keep ids unfiltered when we can't resolve node->planet.
+                    planet = None
+                else:
+                    node_key = m.get("node") or m.get("location") or ""
+                    p_key = self._node_planet_key(node_key, nodes_map)
+                    if not p_key or p_key != planet.lower():
+                        continue
             fid = m.get("id") or m.get("_id")
             if not fid:
                 node = m.get("node") or m.get("location") or ""
@@ -2436,6 +2651,7 @@ class WarframeDatasourcePlugin(Star):
                     "- /wf 订阅 裂缝 钢铁 防御",
                     "- /wf 订阅 裂缝 九重天",
                     "- /wf 订阅 裂缝 古纪 捕获",
+                    "- /wf 订阅 裂缝 钢铁 天王星 防御",
                     "平原过滤示例：",
                     "- /wf 订阅 夜灵平原 夜晚",
                     "- /wf 订阅 平原 夜晚",

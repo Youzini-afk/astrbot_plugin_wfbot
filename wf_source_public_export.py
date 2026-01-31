@@ -92,10 +92,12 @@ class PublicExportClient:
                 url = f"{url}?t={int(time.time())}"
             urls.append(url)
         last_status = 0
+        last_error = None
         for url in urls:
             try:
                 resp = await self._http.get(url)
-            except Exception:
+            except Exception as e:
+                last_error = e
                 continue
             last_status = int(resp.status or 0)
             if not (200 <= resp.status < 300):
@@ -127,7 +129,8 @@ class PublicExportClient:
                             if not (200 <= resp.status < 300):
                                 continue
                             raw = await resp.read()
-                    except Exception:
+                    except Exception as e:
+                        last_error = e
                         continue
                     if not raw or len(raw) < 32:
                         continue
@@ -136,8 +139,10 @@ class PublicExportClient:
                     except lzma.LZMAError:
                         continue
                     return raw, last_status
-        except Exception:
-            pass
+        except Exception as e:
+            last_error = e
+        if last_error:
+            logger.debug("public export index fetch error: %s", last_error)
         return None, last_status
 
     async def update(self, *, language: str = "zh") -> PublicExportUpdateResult:
@@ -151,13 +156,13 @@ class PublicExportClient:
         for attempt in range(2):
             raw_bytes, last_status = await self._fetch_index_bytes(language=language, attempt=attempt)
             if raw_bytes is None:
-                logger.warning("public export index fetch failed (attempt=%s)", attempt + 1)
+                logger.debug("public export index fetch failed (attempt=%s, status=%s)", attempt + 1, last_status)
                 continue
             try:
                 decompressed = await asyncio.to_thread(lzma.decompress, raw_bytes)
                 break
             except lzma.LZMAError as e:
-                logger.warning("public export index decompress failed (attempt=%s): %s", attempt + 1, e)
+                logger.debug("public export index decompress failed (attempt=%s): %s", attempt + 1, e)
                 raw_bytes = None
                 decompressed = None
 
@@ -170,9 +175,9 @@ class PublicExportClient:
                     if cached_raw and len(cached_raw) >= 32:
                         decompressed = await asyncio.to_thread(lzma.decompress, cached_raw)
                         raw_bytes = cached_raw
+                        logger.debug("using cached public export index")
             except Exception as e:
-                logger.warning("public export cached index decompress failed: %s", e)
-
+                logger.debug("public export cached index decompress failed: %s", e)
         if decompressed is None:
             return PublicExportUpdateResult(
                 language=language,

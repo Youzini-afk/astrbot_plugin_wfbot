@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any
 
 from .wf_cache import FileCache
@@ -39,6 +40,37 @@ def _looks_like_official(ws: Any) -> bool:
 
 def _normalize_official_worldstate(ws: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
+
+    def norm_cycle(c: Any) -> dict[str, Any] | None:
+        if not isinstance(c, dict):
+            return None
+        return {
+            "state": c.get("state") or c.get("State"),
+            "isDay": c.get("isDay") if "isDay" in c else c.get("IsDay") or c.get("isday"),
+            "isWarm": c.get("isWarm") if "isWarm" in c else c.get("IsWarm") or c.get("iswarm"),
+            "expiry": _unwrap_date(c.get("expiry") or c.get("Expiry")),
+            "activation": _unwrap_date(c.get("activation") or c.get("Activation")),
+            "timeLeft": c.get("timeLeft") or c.get("TimeLeft"),
+        }
+
+    def _find_syndicate_cycle(tag: str) -> dict[str, Any] | None:
+        missions = ws.get("SyndicateMissions")
+        if not isinstance(missions, list):
+            return None
+        for m in missions:
+            if not isinstance(m, dict):
+                continue
+            if m.get("Tag") != tag:
+                continue
+            activation = _unwrap_date(m.get("Activation"))
+            expiry = _unwrap_date(m.get("Expiry"))
+            if activation is None or expiry is None:
+                continue
+            return {
+                "activation": activation,
+                "expiry": expiry,
+            }
+        return None
 
     def norm_alert(a: Any) -> Any:
         if not isinstance(a, dict):
@@ -229,6 +261,84 @@ def _normalize_official_worldstate(ws: dict[str, Any]) -> dict[str, Any]:
             "tag": season.get("AffiliationTag"),
             "expiry": _unwrap_date(season.get("Expiry")),
         }
+
+    cycle_map = {
+        "earthCycle": ("EarthCycle", "earthCycle"),
+        "cetusCycle": ("CetusCycle", "cetusCycle"),
+        "vallisCycle": ("VallisCycle", "vallisCycle"),
+        "cambionCycle": ("CambionCycle", "cambionCycle"),
+        "zarimanCycle": ("ZarimanCycle", "zarimanCycle"),
+        "duviriCycle": ("DuviriCycle", "duviriCycle", "DuvalierCycle", "duvalierCycle"),
+    }
+    for out_key, keys in cycle_map.items():
+        src = None
+        for k in keys:
+            if k in ws:
+                src = ws.get(k)
+                break
+        norm = norm_cycle(src)
+        if isinstance(norm, dict):
+            out[out_key] = norm
+            if out_key == "duviriCycle":
+                out["duvalierCycle"] = norm
+
+    # Fallback: derive cycles from SyndicateMissions (official worldstate)
+    now_ts = float(ws.get("Time") or time.time())
+    
+    if "cetusCycle" not in out:
+        c = _find_syndicate_cycle("CetusSyndicate")
+        if isinstance(c, dict):
+            cycle_duration = 150 * 60  # 150 minutes total
+            phase_duration = 100 * 60  # 100 minutes day
+            activation_ts = float(c["activation"])
+            elapsed = (now_ts - activation_ts) % cycle_duration
+            is_day = elapsed < phase_duration
+            c["state"] = "day" if is_day else "night"
+            c["isDay"] = is_day
+            # Calculate when the current phase ends
+            next_phase_end = activation_ts + (((int(elapsed / phase_duration) + 1) * phase_duration) if is_day else cycle_duration)
+            # Adjust to ensure it's in the future
+            if next_phase_end <= now_ts:
+                next_phase_end += cycle_duration
+            c["expiry"] = next_phase_end
+            out["cetusCycle"] = c
+    
+    if "vallisCycle" not in out:
+        v = _find_syndicate_cycle("SolarisSyndicate")
+        if isinstance(v, dict):
+            cycle_duration = 160 * 60  # 160 minutes total (80 warm + 80 cold)
+            phase_duration = 80 * 60
+            activation_ts = float(v["activation"])
+            elapsed = (now_ts - activation_ts) % cycle_duration
+            is_warm = elapsed < phase_duration
+            v["state"] = "warm" if is_warm else "cold"
+            v["isWarm"] = is_warm
+            next_phase_end = activation_ts + (((int(elapsed / phase_duration) + 1) * phase_duration) if is_warm else cycle_duration)
+            if next_phase_end <= now_ts:
+                next_phase_end += cycle_duration
+            v["expiry"] = next_phase_end
+            out["vallisCycle"] = v
+    
+    if "cambionCycle" not in out:
+        c = _find_syndicate_cycle("EntratiSyndicate")
+        if isinstance(c, dict):
+            cycle_duration = 150 * 60  # 150 minutes total (75 Fass + 75 Vome)
+            phase_duration = 75 * 60
+            activation_ts = float(c["activation"])
+            elapsed = (now_ts - activation_ts) % cycle_duration
+            is_fass = elapsed < phase_duration
+            c["state"] = "fass" if is_fass else "vome"
+            next_phase_end = activation_ts + (((int(elapsed / phase_duration) + 1) * phase_duration) if is_fass else cycle_duration)
+            if next_phase_end <= now_ts:
+                next_phase_end += cycle_duration
+            c["expiry"] = next_phase_end
+            out["cambionCycle"] = c
+    
+    if "zarimanCycle" not in out:
+        z = _find_syndicate_cycle("ZarimanSyndicate")
+        if isinstance(z, dict):
+            # Zariman has multiple states but we keep whatever state is in the data
+            out["zarimanCycle"] = z
 
     out["_source"] = {"schema": "official", "url": WARFRAME_WORLD_STATE_URL}
     out["_fetched_at"] = ws.get("Time")

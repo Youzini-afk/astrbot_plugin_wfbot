@@ -103,6 +103,7 @@ class WarframeDataManager:
                 return result
 
             self._worldstate_mem = result.json
+
             self._worldstate_mem_at = time.time()
 
             new_sha = await asyncio.to_thread(_sha256_hex, result.raw)
@@ -258,11 +259,84 @@ class WarframeDataManager:
 
     async def refresh_cycles(self) -> dict[str, Any]:
         async with self._cycles_lock:
+            def _is_cycle_payload(data: Any) -> bool:
+                if not isinstance(data, dict):
+                    return False
+                if "error" in data:
+                    return False
+                for k in ("timeLeft", "expiry", "expiration", "expiryDate", "endTime", "isDay", "isWarm", "state"):
+                    if k in data:
+                        return True
+                return False
+
+            async def _fetch_worldstate_cycles() -> tuple[dict[str, dict], str | None, int | None]:
+                urls = [
+                    "https://api.warframestat.us/pc",
+                    "https://api.warframestat.us/pc/",
+                    "https://api.warframestat.us/pc?language=zh",
+                    "https://api.warframestat.us/pc?language=en",
+                    "http://api.warframestat.us/pc",
+                    "http://api.warframestat.us/pc/",
+                    "http://api.warframestat.us/pc?language=zh",
+                    "http://api.warframestat.us/pc?language=en",
+                    "https://api.warframestat.us/pc/worldstate",
+                    "https://api.warframestat.us/pc/worldstate?language=zh",
+                    "https://api.warframestat.us/pc/worldstate?language=en",
+                    "http://api.warframestat.us/pc/worldstate",
+                    "http://api.warframestat.us/pc/worldstate?language=zh",
+                    "http://api.warframestat.us/pc/worldstate?language=en",
+                    "https://r.jina.ai/http://api.warframestat.us/pc",
+                    "https://r.jina.ai/http://api.warframestat.us/pc/",
+                    "https://r.jina.ai/http://api.warframestat.us/pc?language=zh",
+                    "https://r.jina.ai/http://api.warframestat.us/pc?language=en",
+                    "https://r.jina.ai/http://api.warframestat.us/pc/worldstate",
+                    "https://r.jina.ai/http://api.warframestat.us/pc/worldstate?language=zh",
+                    "https://r.jina.ai/http://api.warframestat.us/pc/worldstate?language=en",
+                    "https://r.jina.ai/https://api.warframestat.us/pc",
+                    "https://r.jina.ai/https://api.warframestat.us/pc/",
+                    "https://r.jina.ai/https://api.warframestat.us/pc?language=zh",
+                    "https://r.jina.ai/https://api.warframestat.us/pc?language=en",
+                    "https://r.jina.ai/https://api.warframestat.us/pc/worldstate",
+                    "https://r.jina.ai/https://api.warframestat.us/pc/worldstate?language=zh",
+                    "https://r.jina.ai/https://api.warframestat.us/pc/worldstate?language=en",
+                ]
+                for url in urls:
+                    try:
+                        resp = await self._ds.http.get(url)
+                    except Exception as e:
+                        logger.debug("cycle worldstate fetch error: %s (%s)", url, e)
+                        continue
+                    if not (200 <= resp.status < 300):
+                        logger.debug("cycle worldstate status: %s (%s)", url, resp.status)
+                        continue
+                    try:
+                        data = resp.json()
+                    except Exception as e:
+                        logger.debug("cycle worldstate json parse failed: %s (%s)", url, e)
+                        continue
+                    if not isinstance(data, dict) or "error" in data:
+                        logger.debug("cycle worldstate invalid payload: %s", url)
+                        continue
+                    cycles: dict[str, dict] = {}
+                    for key in ("earthCycle", "cetusCycle", "vallisCycle", "cambionCycle", "zarimanCycle", "duviriCycle"):
+                        v = data.get(key)
+                        if not isinstance(v, dict):
+                            continue
+                        if _is_cycle_payload(v) or key == "earthCycle":
+                            cycles[key] = v
+                    if cycles:
+                        return cycles, url, int(resp.status or 0)
+                return {}, None, None
+
             out: dict[str, Any] = {}
+            missing: list[str] = []
             for ds in self._cycles:
-                result = await self._ds.mirrors.fetch_first_json(ds.urls)
+                logger.debug("fetching cycle: %s from %s", ds.name, ds.urls[0] if ds.urls else "?")
+                result = await self._ds.mirrors.fetch_first_json(ds.urls, validate=_is_cycle_payload)
                 out[ds.name] = result.json
                 if result.json is None:
+                    logger.warning("cycle data fetch failed: %s (status=%s, url=%s)", ds.name, result.status, result.url)
+                    missing.append(ds.name)
                     meta = {"fetched_at": _utcnow().isoformat(), "url": result.url, "status": result.status, "sha256": None}
                     await self._cache.write_json(meta, "mirrors", ds.name, "latest.meta.json")
                     continue
@@ -270,8 +344,101 @@ class WarframeDataManager:
                 raw = await asyncio.to_thread(_json_bytes, result.json) if isinstance(result.json, (dict, list)) else str(result.json).encode("utf-8", errors="replace")
                 sha = await asyncio.to_thread(_sha256_hex, raw)
                 meta = {"fetched_at": _utcnow().isoformat(), "url": result.url, "status": result.status, "sha256": sha}
+                logger.debug("cycle data cached: %s (status=%s)", ds.name, result.status)
                 await self._cache.write_json(result.json, "mirrors", ds.name, "latest.json")
                 await self._cache.write_json(meta, "mirrors", ds.name, "latest.meta.json")
+
+            if missing:
+                # Try to recover from cached official worldstate first
+                try:
+                    ws = await self._ds.worldstate.load_cached()
+                except Exception:
+                    ws = None
+                if isinstance(ws, dict):
+                    recovered = False
+                    # Helper to compute cycle state based on activation time
+                    def _compute_cycle_state(cycle_dict: dict, cycle_type: str) -> dict:
+                        if not isinstance(cycle_dict, dict):
+                            return cycle_dict
+                        activation = cycle_dict.get("activation")
+                        if activation is None:
+                            return cycle_dict
+                        try:
+                            now_ts = float(ws.get("Time") or time.time())
+                            activation_ts = float(activation)
+                            cycle_dict = dict(cycle_dict)  # Make a copy
+                            
+                            if cycle_type == "cetus":
+                                cycle_duration = 150 * 60  # 150 min
+                                phase_duration = 100 * 60  # 100 min day
+                                elapsed = (now_ts - activation_ts) % cycle_duration
+                                is_day = elapsed < phase_duration
+                                cycle_dict["state"] = "day" if is_day else "night"
+                                cycle_dict["isDay"] = is_day
+                                next_phase_end = activation_ts + (((int(elapsed / phase_duration) + 1) * phase_duration) if is_day else cycle_duration)
+                                if next_phase_end <= now_ts:
+                                    next_phase_end += cycle_duration
+                                cycle_dict["expiry"] = next_phase_end
+                            elif cycle_type == "vallis":
+                                cycle_duration = 160 * 60  # 160 min
+                                phase_duration = 80 * 60   # 80 min warm
+                                elapsed = (now_ts - activation_ts) % cycle_duration
+                                is_warm = elapsed < phase_duration
+                                cycle_dict["state"] = "warm" if is_warm else "cold"
+                                cycle_dict["isWarm"] = is_warm
+                                next_phase_end = activation_ts + (((int(elapsed / phase_duration) + 1) * phase_duration) if is_warm else cycle_duration)
+                                if next_phase_end <= now_ts:
+                                    next_phase_end += cycle_duration
+                                cycle_dict["expiry"] = next_phase_end
+                            elif cycle_type == "cambion":
+                                cycle_duration = 150 * 60  # 150 min
+                                phase_duration = 75 * 60   # 75 min Fass
+                                elapsed = (now_ts - activation_ts) % cycle_duration
+                                is_fass = elapsed < phase_duration
+                                cycle_dict["state"] = "fass" if is_fass else "vome"
+                                next_phase_end = activation_ts + (((int(elapsed / phase_duration) + 1) * phase_duration) if is_fass else cycle_duration)
+                                if next_phase_end <= now_ts:
+                                    next_phase_end += cycle_duration
+                                cycle_dict["expiry"] = next_phase_end
+                        except Exception as e:
+                            logger.debug("cycle state computation failed for %s: %s", cycle_type, e)
+                        return cycle_dict
+                    
+                    for ds_name in list(missing):
+                        key = ds_name.replace("cycle_", "") + "Cycle"
+                        cycle_type = ds_name.replace("cycle_", "")
+                        v = ws.get(key)
+                        if isinstance(v, dict) and (_is_cycle_payload(v) or ds_name == "cycle_earth"):
+                            # Recompute cycle state based on activation time
+                            v = _compute_cycle_state(v, cycle_type)
+                            raw = await asyncio.to_thread(_json_bytes, v)
+                            sha = await asyncio.to_thread(_sha256_hex, raw)
+                            meta = {"fetched_at": _utcnow().isoformat(), "url": "worldstate", "status": 200, "sha256": sha}
+                            await self._cache.write_json(v, "mirrors", ds_name, "latest.json")
+                            await self._cache.write_json(meta, "mirrors", ds_name, "latest.meta.json")
+                            out[ds_name] = v
+                            recovered = True
+                            logger.info("cycle data recovered from cached worldstate: %s", ds_name)
+                    if recovered:
+                        missing = [n for n in missing if n not in out]
+
+            if missing:
+                cycles, url, status = await _fetch_worldstate_cycles()
+                if cycles:
+                    for ds_name in list(missing):
+                        key = ds_name.replace("cycle_", "") + "Cycle"
+                        v = cycles.get(key)
+                        if not isinstance(v, dict):
+                            continue
+                        raw = await asyncio.to_thread(_json_bytes, v)
+                        sha = await asyncio.to_thread(_sha256_hex, raw)
+                        meta = {"fetched_at": _utcnow().isoformat(), "url": url, "status": status, "sha256": sha}
+                        await self._cache.write_json(v, "mirrors", ds_name, "latest.json")
+                        await self._cache.write_json(meta, "mirrors", ds_name, "latest.meta.json")
+                        out[ds_name] = v
+                        logger.info("cycle data recovered from worldstate: %s", ds_name)
+                else:
+                    logger.warning("cycle worldstate fallback failed; missing=%s", missing)
             return out
 
     async def refresh_market_bootstrap(self) -> dict[str, int]:
@@ -356,7 +523,9 @@ class WarframeDataManager:
             logger.exception("refresh_public_export failed")
 
         try:
-            await self.refresh_cycles()
+            logger.info("starting refresh_cycles...")
+            result = await self.refresh_cycles()
+            logger.info("refresh_cycles completed: %s", {k: (type(v).__name__ if v is not None else "None") for k, v in result.items()})
         except Exception:
             logger.exception("refresh_cycles failed")
 
@@ -476,4 +645,3 @@ class WarframeDataManager:
                     p.unlink()
                 except FileNotFoundError:
                     pass
-

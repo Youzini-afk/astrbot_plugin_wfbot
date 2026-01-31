@@ -3,3 +3,7 @@ __pycache__/
 
 # Local render test artifacts
 render_test*.png
+
+# Local plugin data/cache (may include PII such as user IDs in subscriptions)
+.plugin_data/
+storage.sqlite3
