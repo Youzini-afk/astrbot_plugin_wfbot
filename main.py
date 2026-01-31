@@ -192,10 +192,26 @@ class WarframeDatasourcePlugin(Star):
             proxy_url = None
 
         # log.* with fallback to legacy top-level keys for compatibility
+        def _as_bool(value, default: bool) -> bool:
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                s = value.strip().lower()
+                if s in {"1", "true", "yes", "on"}:
+                    return True
+                if s in {"0", "false", "no", "off"}:
+                    return False
+                return default
+            return bool(value)
+
         def _log_get(key: str, default: bool) -> bool:
             if isinstance(log_cfg, dict) and key in log_cfg:
-                return bool(log_cfg.get(key, default))
-            return bool(self.config.get(f"log_{key}", self.config.get(key, default)))
+                return _as_bool(log_cfg.get(key), default)
+            return _as_bool(self.config.get(f"log_{key}", default), default)
 
         return WarframeConfig(
             data_dir=data_dir,

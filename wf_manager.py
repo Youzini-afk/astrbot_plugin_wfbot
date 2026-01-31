@@ -444,7 +444,7 @@ class WarframeDataManager:
                         await self._cache.write_json(meta, "mirrors", ds_name, "latest.meta.json")
                         out[ds_name] = v
                         if self._cfg.log_cycle_enabled and self._cfg.log_cycle_fetch_success:
-                        log_info("cycle data recovered from worldstate: %s", ds_name, category="cycle")
+                            log_info("cycle data recovered from worldstate: %s", ds_name, category="cycle")
                 else:
                     if self._cfg.log_cycle_enabled and self._cfg.log_cycle_fetch_failures:
                         log_warning("cycle worldstate fallback failed; missing=%s", missing, category="cycle")
