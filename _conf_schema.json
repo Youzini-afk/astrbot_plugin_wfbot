@@ -155,7 +155,7 @@
         "hint": "当默认域名不可用时可改为自建镜像或代理地址。"
       },
       "warframestat_mirror_urls": {
-        "type": "array",
+        "type": "list",
         "description": "warframestat 备选镜像地址（按顺序尝试）",
         "default": [],
         "hint": "支持多个镜像；每个地址无需带 /pc。",
